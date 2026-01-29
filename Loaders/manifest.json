@@ -26,7 +26,7 @@
       "placeId": "109983668079237",
       "universal": false,
       "description": "Brainrot Sniper for steal a brain rot",
-      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/BranrotSniper.lua"
+      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/BrainrotSniper.lua"
     },
     {
       "name": "Skyven",
@@ -61,7 +61,7 @@
       "placeId": "universal",
       "universal": true,
       "description": "Parkour leagacy Script , can also be used universaly",
-      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/ParcourRecorder.lua"
+      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/ParkourRecorder.lua"
     },
     {
       "name": "Weaponary",
@@ -73,3 +73,4 @@
   ]
 
 }
+
