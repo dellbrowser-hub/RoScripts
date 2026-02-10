@@ -1,7 +1,7 @@
 --[[
     RenU V4.1 - Universal Hub (Full Rewrite)
     Migrated to RenLibBêta | Enhanced & Expanded
-    Original by SoLoIsTe_Cry | Upgraded by Claude
+    Original by xsakyx
 
     FIXES: TP fling, Follow (now walks naturally), Bang (from behind),
            Backpack/Head (animated), ESP toggles, FOV RGB sliders
