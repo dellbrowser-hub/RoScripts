@@ -1012,4 +1012,197 @@ local selInt = ""
 local intDrop = IntSec:CreateDropdown({Name = "Target Player", Values = GetPlayerNames(), Flag = "IntP", Callback = function(v) selInt = v end})
 
 IntSec:CreateDropdown({
-    Name = "
+    Name = "Mode",
+    Values = {"Follow", "Backpack", "Head", "Bang", "GetBanged", "Proposal", "Slap", "Orbit", "Stare", "Attach"},
+    Default = "Follow", Flag = "IntMode",
+    Callback = function(v) Interact.Mode = v end
+})
+
+IntSec:CreateSlider({Name = "Follow/Orbit Distance", Min = 1, Max = 20, Default = 5, Flag = "IntDist", Callback = function(v) Interact.Dist = v end})
+IntSec:CreateSlider({Name = "Bang Speed", Min = 1, Max = 5, Default = 1, Flag = "BangSpd", Callback = function(v)
+    Interact.BangSpeed = v
+    if Interact.Anim and (Interact.Mode == "Bang" or Interact.Mode == "GetBanged") then
+        pcall(function() Interact.Anim:AdjustSpeed(v) end)
+    end
+end})
+IntSec:CreateSlider({Name = "Slap Fling Power", Min = 10, Max = 500, Default = 100, Flag = "SlapPow", Callback = function(v) Interact.FlingPower = v end})
+
+IntSec:CreateButton({Name = "Start", Callback = function()
+    if selInt == "" then Notify("Interact", "Select a player", "❌", 2); return end
+    Interact.Start(selInt)
+end})
+IntSec:CreateButton({Name = "Stop", Callback = function() Interact.Stop() end})
+IntSec:CreateButton({Name = "Refresh Players", Callback = function()
+    local n = GetPlayerNames(); intDrop:Refresh(n); tpDrop:Refresh(n)
+    Notify("Players", "Refreshed", "🔄", 1)
+end})
+
+-- Mode descriptions
+local DescSec = PlayersTab:CreateSection({Name = "Mode Info", Side = "Right"})
+DescSec:CreateLabel("Follow: Walk behind, mimic jumps")
+DescSec:CreateLabel("Backpack: Ride on their back")
+DescSec:CreateLabel("Head: Sit on their head")
+DescSec:CreateLabel("Bang: From behind with animation")
+DescSec:CreateLabel("GetBanged: You receive it")
+DescSec:CreateLabel("Proposal: Kneel in front, offer ring")
+DescSec:CreateLabel("Slap: Punch + fling them")
+DescSec:CreateLabel("Orbit: Circle around them")
+DescSec:CreateLabel("Stare: Always face them (creepy)")
+DescSec:CreateLabel("Attach: Ride inside them")
+
+---------------------------------------------------------
+-- UI: TROLL TAB
+---------------------------------------------------------
+local SwimSec = TrollTab:CreateSection({Name = "Air Swim", Side = "Left"})
+SwimSec:CreateToggle({Name = "Air Swim", Default = false, Flag = "ASwim", Callback = function(v) if v then AirSwim.Enable() else AirSwim.Disable() end end})
+SwimSec:CreateSlider({Name = "Swim Speed", Min = 10, Max = 150, Default = 30, Flag = "SwSpd", Callback = function(v) AirSwim.Speed = v end})
+
+local FlkSec = TrollTab:CreateSection({Name = "Glitch Flicker", Side = "Left"})
+FlkSec:CreateToggle({Name = "Glitch Flicker", Default = false, Flag = "Flk", Callback = function(v) if v then Flicker.Enable() else Flicker.Disable() end end})
+FlkSec:CreateSlider({Name = "Flicker Range", Min = 5, Max = 30, Default = 12, Flag = "FlkR", Callback = function(v) Flicker.Range = v end})
+
+local CloneSec = TrollTab:CreateSection({Name = "Doppelganger", Side = "Right"})
+CloneSec:CreateToggle({Name = "Spawn Clone", Default = false, Flag = "Clone", Callback = function(v) if v then Doppel.Enable() else Doppel.Disable() end end})
+CloneSec:CreateLabel("Clone follows you with a delay")
+
+local DsSec = TrollTab:CreateSection({Name = "Desync", Side = "Right"})
+DsSec:CreateToggle({Name = "Desync (experimental)", Default = false, Flag = "Dsync", Callback = function(v) if v then Desync.Enable() else Desync.Disable() end end})
+DsSec:CreateLabel("Server sees you somewhere else")
+
+local SpnSec = TrollTab:CreateSection({Name = "Spin / Headless", Side = "Right"})
+SpnSec:CreateToggle({Name = "Spin", Default = false, Flag = "Spin", Callback = function(v) if v then Spin.Enable() else Spin.Disable() end end})
+SpnSec:CreateSlider({Name = "Spin Speed", Min = 5, Max = 100, Default = 30, Flag = "SpnSpd", Callback = function(v) Spin.Speed = v; if Spin.BAV then Spin.BAV.AngularVelocity = Vector3.new(0,v,0) end end})
+SpnSec:CreateToggle({Name = "Headless", Default = false, Flag = "Hdlss", Callback = function(v) if v then Headless.Enable() else Headless.Disable() end end})
+
+---------------------------------------------------------
+-- UI: VISUALS TAB
+---------------------------------------------------------
+local VisSec = VisualsTab:CreateSection({Name = "Character", Side = "Left"})
+VisSec:CreateToggle({Name = "Invisibility", Default = false, Flag = "Inv", Callback = function(v) if v then Invis.Hide() else Invis.Show() end end})
+VisSec:CreateToggle({Name = "Fullbright", Default = false, Flag = "FBr", Callback = function(v) if v then FB.Enable() else FB.Disable() end end})
+VisSec:CreateLabel("Invisibility is client-side only")
+
+local CamSec = VisualsTab:CreateSection({Name = "Camera", Side = "Right"})
+CamSec:CreateToggle({Name = "Freecam", Default = false, Flag = "FCam", Callback = function(v) if v then FC.Enable() else FC.Disable() end end})
+CamSec:CreateSlider({Name = "Freecam Speed", Min = 10, Max = 200, Default = 50, Flag = "FCSpd", Callback = function(v) FC.Speed = v end})
+CamSec:CreateSlider({Name = "Field of View", Min = 30, Max = 120, Default = 70, Flag = "CamFOV", Callback = function(v) Camera.FieldOfView = v end})
+
+---------------------------------------------------------
+-- UI: MISC TAB
+---------------------------------------------------------
+local UtilSec = MiscTab:CreateSection({Name = "Utilities", Side = "Left"})
+UtilSec:CreateToggle({Name = "Anti-AFK", Default = false, Flag = "AAFK", Callback = function(v) if v then AntiAFK.Enable() else AntiAFK.Disable() end end})
+UtilSec:CreateToggle({Name = "Quick Keybinds (E/G/X)", Default = true, Flag = "KB", Callback = function(v) KeybindsEnabled = v end})
+
+UtilSec:CreateButton({Name = "Rejoin", Callback = function() game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, game.JobId) end})
+UtilSec:CreateButton({Name = "Server Hop", Callback = function()
+    Notify("Hop", "Finding server...", "🔄", 2)
+    task.spawn(function()
+        pcall(function()
+            local d = game:GetService("HttpService"):JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/0?sortOrder=2&excludeFullGames=true&limit=100"))
+            for _, s in ipairs(d.data) do
+                if s.id ~= game.JobId and s.playing < s.maxPlayers then
+                    game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, s.id); return
+                end
+            end
+            Notify("Hop", "No servers", "❌", 2)
+        end)
+    end)
+end})
+UtilSec:CreateButton({Name = "Reset Character", Callback = function() local _,h = GetCharacter(); if h then h.Health = 0 end end})
+
+-- Server info
+local InfoSec = MiscTab:CreateSection({Name = "Server Info", Side = "Right"})
+local infoLbl = InfoSec:CreateLabel("Loading...")
+task.spawn(function()
+    while task.wait(3) do
+        pcall(function()
+            local pc = #Players:GetPlayers(); local mx = Players.MaxPlayers
+            local ping = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue())
+            local fps = math.floor(1/RunService.RenderStepped:Wait())
+            infoLbl:SetText("Players: "..pc.."/"..mx.." | Ping: "..ping.."ms | FPS: "..fps)
+        end)
+    end
+end)
+
+-- Tools
+local ToolSec = MiscTab:CreateSection({Name = "Tools", Side = "Right"})
+ToolSec:CreateButton({Name = "Infinity Yield", Callback = function()
+    task.spawn(function() pcall(function() loadstring(game:HttpGet("https://raw.githubusercontent.com/xsakyx/InfiniteYield-MyOwneUpload/refs/heads/main/infiniteyield.lua"))() end) end)
+end})
+ToolSec:CreateButton({Name = "Dark Dex", Callback = function()
+    task.spawn(function() pcall(function() loadstring(game:HttpGet("https://raw.githubusercontent.com/xsakyx/DarkDex-MyOwnUpload/refs/heads/main/Dex.lua"))() end) end)
+end})
+
+-- Script control
+local CtrlSec = MiscTab:CreateSection({Name = "Script Control", Side = "Right"})
+CtrlSec:CreateButton({Name = "Disable All", Callback = function()
+    pcall(function() Aim.Disable() end); pcall(function() ESP.Disable() end)
+    pcall(function() Fly.Stop() end); pcall(function() Noclip.Disable() end)
+    pcall(function() Invis.Show() end); pcall(function() Interact.Stop() end)
+    pcall(function() Fling.Disable() end); pcall(function() ClickTP.Disable() end)
+    pcall(function() InfJump.Disable() end); pcall(function() AntiAFK.Disable() end)
+    pcall(function() FB.Disable() end); pcall(function() FC.Disable() end)
+    pcall(function() AirSwim.Disable() end); pcall(function() Flicker.Disable() end)
+    pcall(function() Doppel.Disable() end); pcall(function() Desync.Disable() end)
+    pcall(function() Spin.Disable() end); pcall(function() Headless.Disable() end)
+    pcall(function() Camera.FieldOfView = 70; workspace.Gravity = 196.2 end)
+    local _,h = GetCharacter(); if h then h.WalkSpeed = 16; h.JumpPower = 50 end
+    Notify("RenU V4", "All disabled", "🛑", 3)
+end})
+CtrlSec:CreateButton({Name = "Destroy Script", Callback = function()
+    pcall(function() Aim.Disable() end); pcall(function() ESP.Disable() end)
+    pcall(function() Fly.Stop() end); pcall(function() Noclip.Disable() end)
+    pcall(function() Invis.Show() end); pcall(function() Interact.Stop() end)
+    pcall(function() Fling.Disable() end); pcall(function() AirSwim.Disable() end)
+    pcall(function() Flicker.Disable() end); pcall(function() Doppel.Disable() end)
+    pcall(function() Desync.Disable() end); pcall(function() Spin.Disable() end)
+    pcall(function() Headless.Disable() end)
+    for _, c in pairs(AllConnections) do pcall(function() c:Disconnect() end) end
+    Library:Unload()
+end})
+
+---------------------------------------------------------
+-- UI: HELP TAB
+---------------------------------------------------------
+local KBSec = HelpTab:CreateSection({Name = "Keybinds", Side = "Left"})
+KBSec:CreateLabel("K = Toggle UI")
+KBSec:CreateLabel("E = Toggle Fly")
+KBSec:CreateLabel("G = Toggle Noclip")
+KBSec:CreateLabel("X = Aimbot Lock/Unlock")
+KBSec:CreateLabel("Shift = Fly/Swim Boost")
+KBSec:CreateLabel("Space/Ctrl = Fly Up/Down")
+
+local FISec = HelpTab:CreateSection({Name = "Features", Side = "Right"})
+FISec:CreateLabel("10 interaction modes (Follow to Attach)")
+FISec:CreateLabel("Air Swim - fly through air with swim anim")
+FISec:CreateLabel("Glitch Flicker - teleport chaos with echoes")
+FISec:CreateLabel("Doppelganger - shadow clone follows you")
+FISec:CreateLabel("Desync - server/client position mismatch")
+FISec:CreateLabel("Fling - spin to fling others on contact")
+FISec:CreateLabel("Slap mode - punch animation + fling target")
+
+local CrSec = HelpTab:CreateSection({Name = "Credits", Side = "Right"})
+CrSec:CreateLabel("RenU V4.1 | Original: SoLoIsTe_Cry")
+CrSec:CreateLabel("Enhanced by Claude | RenLibBeta")
+
+---------------------------------------------------------
+-- KEYBIND HANDLER
+---------------------------------------------------------
+SafeConnect(UserInputService.InputBegan, function(i, g)
+    if g or not KeybindsEnabled then return end
+    if i.KeyCode == Enum.KeyCode.E then Fly.Toggle()
+    elseif i.KeyCode == Enum.KeyCode.G then Noclip.Toggle() end
+end)
+
+---------------------------------------------------------
+-- AUTO-REFRESH PLAYER LISTS
+---------------------------------------------------------
+SafeConnect(Players.PlayerAdded, function()
+    task.wait(1); pcall(function() local n = GetPlayerNames(); tpDrop:Refresh(n); intDrop:Refresh(n) end)
+end)
+SafeConnect(Players.PlayerRemoving, function()
+    task.wait(0.5); pcall(function() local n = GetPlayerNames(); tpDrop:Refresh(n); intDrop:Refresh(n) end)
+end)
+
+print("[RenU V4.1] Loaded successfully")
