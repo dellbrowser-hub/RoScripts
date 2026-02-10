@@ -994,13 +994,13 @@ FOVSec:CreateSlider({Name = "Blue", Min = 0, Max = 255, Default = 0, Flag = "FB"
 -- ESP
 local ESPSec = CombatTab:CreateSection({Name = "ESP", Side = "Left"})
 ESPSec:CreateToggle({Name = "Enable ESP", Default = false, Flag = "ESPOn", Callback = function(v) if v then ESP.Enable() else ESP.Disable() end end})
-ESPSec:CreateToggle({Name = "Show Names", Default = true, Flag = "ESPN", Callback = function(v) ESP.ShowName = v end})
-ESPSec:CreateToggle({Name = "Show Health", Default = true, Flag = "ESPH", Callback = function(v) ESP.ShowHP = v end})
-ESPSec:CreateToggle({Name = "Show Distance", Default = true, Flag = "ESPD", Callback = function(v) ESP.ShowDist = v end})
-
+ESPSec:CreateToggle({Name = "Show Names (patched)", Default = true, Flag = "ESPN", Callback = function(v) ESP.ShowName = v end})
+ESPSec:CreateToggle({Name = "Show Health (patched)", Default = true, Flag = "ESPH", Callback = function(v) ESP.ShowHP = v end})
+ESPSec:CreateToggle({Name = "Show Distance (patched)", Default = true, Flag = "ESPD", Callback = function(v) ESP.ShowDist = v end})
+ 
 -- Fling
 local FlingSec = CombatTab:CreateSection({Name = "Fling", Side = "Right"})
-FlingSec:CreateToggle({Name = "Fling (spin to fling others)", Default = false, Flag = "FlingOn", Callback = function(v) if v then Fling.Enable() else Fling.Disable() end end})
+FlingSec:CreateToggle({Name = "Fling (patched)", Default = false, Flag = "FlingOn", Callback = function(v) if v then Fling.Enable() else Fling.Disable() end end})
 FlingSec:CreateSlider({Name = "Fling Speed", Min = 10, Max = 500, Default = 100, Flag = "FlSpd", Callback = function(v) Fling.Speed = v; if Fling.BAV then Fling.BAV.AngularVelocity = Vector3.new(0,v,0) end end})
 
 ---------------------------------------------------------
@@ -1054,7 +1054,7 @@ DescSec:CreateLabel("Attach: Ride inside them")
 -- UI: TROLL TAB
 ---------------------------------------------------------
 local SwimSec = TrollTab:CreateSection({Name = "Air Swim", Side = "Left"})
-SwimSec:CreateToggle({Name = "Air Swim", Default = false, Flag = "ASwim", Callback = function(v) if v then AirSwim.Enable() else AirSwim.Disable() end end})
+SwimSec:CreateToggle({Name = "Air Swim (broken)", Default = false, Flag = "ASwim", Callback = function(v) if v then AirSwim.Enable() else AirSwim.Disable() end end})
 SwimSec:CreateSlider({Name = "Swim Speed", Min = 10, Max = 150, Default = 30, Flag = "SwSpd", Callback = function(v) AirSwim.Speed = v end})
 
 local FlkSec = TrollTab:CreateSection({Name = "Glitch Flicker", Side = "Left"})
@@ -1062,7 +1062,7 @@ FlkSec:CreateToggle({Name = "Glitch Flicker", Default = false, Flag = "Flk", Cal
 FlkSec:CreateSlider({Name = "Flicker Range", Min = 5, Max = 30, Default = 12, Flag = "FlkR", Callback = function(v) Flicker.Range = v end})
 
 local CloneSec = TrollTab:CreateSection({Name = "Doppelganger", Side = "Right"})
-CloneSec:CreateToggle({Name = "Spawn Clone", Default = false, Flag = "Clone", Callback = function(v) if v then Doppel.Enable() else Doppel.Disable() end end})
+CloneSec:CreateToggle({Name = "Spawn Clone (broken)", Default = false, Flag = "Clone", Callback = function(v) if v then Doppel.Enable() else Doppel.Disable() end end})
 CloneSec:CreateLabel("Clone follows you with a delay")
 
 local DsSec = TrollTab:CreateSection({Name = "Desync", Side = "Right"})
@@ -1183,8 +1183,7 @@ FISec:CreateLabel("Fling - spin to fling others on contact")
 FISec:CreateLabel("Slap mode - punch animation + fling target")
 
 local CrSec = HelpTab:CreateSection({Name = "Credits", Side = "Right"})
-CrSec:CreateLabel("RenU V4.1 | Original: SoLoIsTe_Cry")
-CrSec:CreateLabel("Enhanced by Claude | RenLibBeta")
+CrSec:CreateLabel("RenU V4.1 | Original: xsakyx")
 
 ---------------------------------------------------------
 -- KEYBIND HANDLER
