@@ -8,6 +8,13 @@
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/RenU-V3.lua"
     },
      {
+      "name": "RenU V4",
+      "placeId": "universal",
+      "universal": true,
+      "description": "RenU V3 with better UI and more features (still in early dev)",
+      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/RenU-V4.lua"
+    },
+     {
       "name": "UI Dumper (Alpha)",
       "placeId": "universal",
       "universal": true,
@@ -73,4 +80,5 @@
   ]
 
 }
+
 
