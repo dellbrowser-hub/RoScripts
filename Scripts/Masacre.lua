@@ -17,6 +17,14 @@ local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local Mouse = LocalPlayer:GetMouse()
 
+--------------------------------------------------------------------------------
+--// MOBILE DETECTION
+-- UserInputService.TouchEnabled = true  → touch screen present
+-- UserInputService.KeyboardEnabled = false → no physical keyboard
+-- Both together = almost certainly mobile
+--------------------------------------------------------------------------------
+local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
 --// State Variables
 local ScriptEnabled = true
 local ESPEnabled = false
@@ -59,6 +67,11 @@ local SprintSpeed = 20
 local NormalSpeed = 15
 local SprintHeld = false
 local SprintConnection = nil
+local MobileSprintActive = false   -- toggleable sprint state for mobile button
+local MobileSprintLoop = nil       -- 0.5s loop for mobile sprint
+
+--// Aimbot (mobile)
+local MobileAimActive = false      -- true while mobile aim button is pressed
 
 --// Storage
 local ESPObjects = {}
@@ -76,6 +89,194 @@ FOVCircle.Transparency = FOVCircleSettings.Transparency
 FOVCircle.NumSides = 64
 FOVCircle.Radius = AimbotSettings.FOV
 FOVCircle.Visible = false
+
+--------------------------------------------------------------------------------
+--// MOBILE GUI BUTTONS (ScreenGui via CoreGui or PlayerGui)
+--------------------------------------------------------------------------------
+
+-- We create a ScreenGui for the mobile buttons
+local MobileGui = Instance.new("ScreenGui")
+MobileGui.Name = "MasacreMobileButtons"
+MobileGui.ResetOnSpawn = false
+MobileGui.IgnoreGuiInset = true
+MobileGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+-- Try to parent to CoreGui for persistence; fall back to PlayerGui
+local guiParentSuccess = pcall(function()
+    MobileGui.Parent = game:GetService("CoreGui")
+end)
+if not guiParentSuccess then
+    MobileGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+--------------------------------------------------------------------------------
+-- Helper: make a round draggable button
+-- Returns the button Frame so we can update its color / visibility later
+--------------------------------------------------------------------------------
+local function CreateMobileButton(label, startPos, onPress, onRelease)
+    local SIZE = 64
+
+    local btn = Instance.new("Frame")
+    btn.Name = label .. "Btn"
+    btn.Size = UDim2.new(0, SIZE, 0, SIZE)
+    btn.Position = startPos
+    btn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    btn.BorderSizePixel = 0
+    btn.Active = true
+    btn.Visible = false
+    btn.ZIndex = 10
+    btn.Parent = MobileGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0) -- fully round
+    corner.Parent = btn
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(200, 200, 200)
+    stroke.Thickness = 2
+    stroke.Parent = btn
+
+    local txtLabel = Instance.new("TextLabel")
+    txtLabel.Size = UDim2.new(1, 0, 1, 0)
+    txtLabel.BackgroundTransparency = 1
+    txtLabel.Text = label
+    txtLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    txtLabel.TextScaled = true
+    txtLabel.Font = Enum.Font.GothamBold
+    txtLabel.ZIndex = 11
+    txtLabel.Parent = btn
+
+    -- Drag logic
+    local dragging = false
+    local dragInput = nil
+    local dragStartPos = nil
+    local btnStartPos = nil
+
+    -- Detect whether a touch is a drag or a tap
+    local touchStartTime = 0
+    local touchStartScreenPos = nil
+    local TAP_MAX_DIST = 10   -- pixels; if finger moves less than this it's a tap
+    local TAP_MAX_TIME = 0.35 -- seconds
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch or
+           input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragInput = input
+            dragStartPos = input.Position
+            btnStartPos = btn.Position
+            touchStartTime = tick()
+            touchStartScreenPos = Vector2.new(input.Position.X, input.Position.Y)
+
+            if onPress then onPress() end
+        end
+    end)
+
+    btn.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStartPos
+            btn.Position = UDim2.new(
+                btnStartPos.X.Scale,
+                btnStartPos.X.Offset + delta.X,
+                btnStartPos.Y.Scale,
+                btnStartPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    btn.InputEnded:Connect(function(input)
+        if input == dragInput then
+            dragging = false
+            dragInput = nil
+
+            -- Check if this was a tap (short time + small movement)
+            local elapsed = tick() - touchStartTime
+            local moved = (Vector2.new(input.Position.X, input.Position.Y) - touchStartScreenPos).Magnitude
+            local isTap = elapsed <= TAP_MAX_TIME and moved <= TAP_MAX_DIST
+
+            if onRelease then onRelease(isTap) end
+        end
+    end)
+
+    return btn, txtLabel
+end
+
+--------------------------------------------------------------------------------
+-- AIMBOT BUTTON (mobile): hold to aim, releases when finger lifts
+-- Color: white = idle, red = actively aiming
+--------------------------------------------------------------------------------
+local AimBtnFrame, AimBtnLabel = CreateMobileButton(
+    "🎯",
+    UDim2.new(1, -80, 0.6, 0),   -- bottom-right area by default
+    function() -- onPress
+        MobileAimActive = true
+        -- color update happens in the main loop / aim loop
+    end,
+    function(isTap) -- onRelease
+        MobileAimActive = false
+    end
+)
+
+--------------------------------------------------------------------------------
+-- SPRINT BUTTON (mobile): tap to toggle sprint on/off
+-- Color: green = sprinting, gray = not sprinting
+--------------------------------------------------------------------------------
+local SprintBtnFrame, SprintBtnLabel = CreateMobileButton(
+    "🏃",
+    UDim2.new(1, -80, 0.75, 0),  -- slightly below aim button
+    function() end, -- nothing on raw press
+    function(isTap)
+        if not isTap then return end -- only act on taps, not drags
+        MobileSprintActive = not MobileSprintActive
+
+        if MobileSprintActive then
+            SprintBtnFrame.BackgroundColor3 = Color3.fromRGB(0, 180, 60)
+        else
+            SprintBtnFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+            -- Restore normal speed immediately
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hum.WalkSpeed = NormalSpeed end
+            end
+        end
+    end
+)
+
+--------------------------------------------------------------------------------
+-- Visibility update for mobile buttons (called when toggles change)
+--------------------------------------------------------------------------------
+local function UpdateMobileButtonVisibility()
+    AimBtnFrame.Visible   = IsMobile and AimbotEnabled
+    SprintBtnFrame.Visible = IsMobile and SprintEnabled
+end
+
+--------------------------------------------------------------------------------
+-- Mobile sprint loop: every 0.5s set WalkSpeed while MobileSprintActive
+--------------------------------------------------------------------------------
+local function StartMobileSprintLoop()
+    if MobileSprintLoop then return end
+    MobileSprintLoop = task.spawn(function()
+        while SprintEnabled do
+            if MobileSprintActive then
+                local char = LocalPlayer.Character
+                if char then
+                    local hum = char:FindFirstChildOfClass("Humanoid")
+                    if hum then hum.WalkSpeed = SprintSpeed end
+                end
+            end
+            task.wait(0.5)
+        end
+        MobileSprintLoop = nil
+    end)
+end
+
+local function StopMobileSprintLoop()
+    MobileSprintActive = false
+    SprintBtnFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    -- MobileSprintLoop will exit on next iteration when SprintEnabled = false
+    MobileSprintLoop = nil
+end
 
 --------------------------------------------------------------------------------
 --// WEAPON DETECTION
@@ -226,7 +427,6 @@ local function UpdateESP()
     local localChar = LocalPlayer.Character
     local localHRP = localChar and localChar:FindFirstChild("HumanoidRootPart")
 
-    -- Clean up ESP for players no longer in game
     for player, _ in pairs(ESPObjects) do
         if not player or not player.Parent then
             RemovePlayerESP(player)
@@ -336,12 +536,10 @@ local function UpdateESP()
     end
 end
 
--- Clean up ESP when player leaves
 table.insert(Connections, Players.PlayerRemoving:Connect(function(player)
     RemovePlayerESP(player)
 end))
 
--- Clean up ESP when character removed
 local function HookCharacterRemoving(player)
     if player == LocalPlayer then return end
     table.insert(Connections, player.CharacterRemoving:Connect(function()
@@ -428,7 +626,8 @@ local function AimAt(player)
 end
 
 --------------------------------------------------------------------------------
---// FOV CIRCLE UPDATE (runs every frame in main loop)
+--// FOV CIRCLE UPDATE
+-- Always visible when aimbot is enabled (not gated on RMB)
 --------------------------------------------------------------------------------
 local function UpdateFOVCircle()
     if AimbotEnabled and FOVCircleSettings.Visible then
@@ -477,7 +676,7 @@ local function ToggleLightHelmet(enabled)
 end
 
 --------------------------------------------------------------------------------
---// NOCLIP (FIXED: dedicated connection, instant on/off)
+--// NOCLIP
 --------------------------------------------------------------------------------
 local function EnableNoclip()
     if NoclipConnection then return end
@@ -493,12 +692,10 @@ local function EnableNoclip()
 end
 
 local function DisableNoclip()
-    -- Disconnect the per-frame loop FIRST (instant stop)
     if NoclipConnection then
         NoclipConnection:Disconnect()
         NoclipConnection = nil
     end
-    -- Force-restore collisions immediately
     local character = LocalPlayer.Character
     if character then
         local humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -507,7 +704,6 @@ local function DisableNoclip()
                 part.CanCollide = true
             end
         end
-        -- Let the humanoid recalculate collision state
         if humanoid then
             humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
         end
@@ -524,7 +720,7 @@ local function ToggleNoclip(enabled)
 end
 
 --------------------------------------------------------------------------------
---// SPRINT (hold Shift = looped 20, release = set 15 and stop)
+--// SPRINT (PC hold-Shift version)
 --------------------------------------------------------------------------------
 local function StartSprint()
     if SprintConnection then return end
@@ -544,13 +740,11 @@ end
 local function StopSprint()
     SprintHeld = false
 
-    -- Disconnect the loop
     if SprintConnection then
         SprintConnection:Disconnect()
         SprintConnection = nil
     end
 
-    -- Set normal speed once
     local character = LocalPlayer.Character
     if character then
         local humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -561,6 +755,23 @@ local function StopSprint()
 end
 
 --------------------------------------------------------------------------------
+--// NO JUMP COOLDOWN
+-- Each frame we reset JumpCooldown to 0 so the player can jump again instantly
+--------------------------------------------------------------------------------
+local JumpCooldownConnection = RunService.Heartbeat:Connect(function()
+    if not ScriptEnabled then return end
+    local character = LocalPlayer.Character
+    if not character then return end
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid:SetAttribute("JumpCooldown", 0)
+        -- Also works for some games using the older property:
+        pcall(function() humanoid.JumpCooldown = 0 end)
+    end
+end)
+table.insert(Connections, JumpCooldownConnection)
+
+--------------------------------------------------------------------------------
 --// CHARACTER RESPAWN HANDLER
 --------------------------------------------------------------------------------
 local function OnCharacterAdded(character)
@@ -568,7 +779,6 @@ local function OnCharacterAdded(character)
     if LightHelmetEnabled then
         CreateLightHelmet()
     end
-    -- Re-enable noclip if it was on
     if NoclipEnabled then
         DisableNoclip()
         EnableNoclip()
@@ -677,9 +887,10 @@ AimbotSection:CreateToggle({
     Flag = "AimbotEnabled",
     Callback = function(value)
         AimbotEnabled = value
+        UpdateMobileButtonVisibility()
         Library:Notify({
             Title = "Aimbot",
-            Content = value and "Enabled (hold RMB to aim)" or "Disabled",
+            Content = value and "Enabled" .. (IsMobile and " (use 🎯 button)" or " (hold RMB)") or "Disabled",
             Emoji = value and "✅" or "❌",
             Duration = 2
         })
@@ -841,22 +1052,30 @@ MiscSection:CreateToggle({
 })
 
 MiscSection:CreateToggle({
-    Name = "Infinite Sprint (hold Shift)",
+    Name = "Infinite Sprint",
     Default = false,
     Flag = "SprintEnabled",
     Callback = function(value)
         SprintEnabled = value
-        if not value and SprintHeld then
-            StopSprint()
+        if value then
+            if IsMobile then
+                StartMobileSprintLoop()
+            end
+        else
+            if SprintHeld then StopSprint() end
+            StopMobileSprintLoop()
         end
+        UpdateMobileButtonVisibility()
         Library:Notify({
             Title = "Sprint",
-            Content = value and "Enabled (hold Shift to run)" or "Disabled",
+            Content = value and ("Enabled" .. (IsMobile and " (tap 🏃 button)" or " (hold Shift)")) or "Disabled",
             Emoji = value and "🏃" or "❌",
             Duration = 2
         })
     end
 })
+
+MiscSection:CreateLabel("No Jump Cooldown is always active")
 
 local ScriptControls = MiscTab:CreateSection({Name = "Script Controls", Side = "Right"})
 
@@ -871,7 +1090,9 @@ ScriptControls:CreateButton({
         ClearAllESP()
         ToggleLightHelmet(false)
         if SprintHeld then StopSprint() end
+        StopMobileSprintLoop()
         FOVCircle.Visible = false
+        UpdateMobileButtonVisibility()
         Library:Notify({Title = "Settings", Content = "All features disabled", Emoji = "✅"})
     end
 })
@@ -884,7 +1105,9 @@ ScriptControls:CreateButton({
         ToggleLightHelmet(false)
         ToggleNoclip(false)
         if SprintHeld then StopSprint() end
+        StopMobileSprintLoop()
         FOVCircle:Remove()
+        MobileGui:Destroy()
         for _, conn in pairs(Connections) do
             pcall(function() conn:Disconnect() end)
         end
@@ -908,25 +1131,33 @@ KeybindsSection:CreateLabel("Shift (hold) = Sprint")
 KeybindsSection:CreateLabel("RMB (hold) = Aim at target")
 KeybindsSection:CreateLabel("K = Toggle UI visibility")
 
-local InfoSection = HelpTab:CreateSection({Name = "How It Works", Side = "Right"})
+local MobileSection = HelpTab:CreateSection({Name = "Mobile Controls", Side = "Right"})
+MobileSection:CreateLabel("🎯 button appears when Aimbot is ON")
+MobileSection:CreateLabel("Hold 🎯 to aim, release to stop")
+MobileSection:CreateLabel("🏃 button appears when Sprint is ON")
+MobileSection:CreateLabel("Tap 🏃 to toggle sprint (green = active)")
+MobileSection:CreateLabel("Both buttons are draggable anywhere on screen")
+
+local InfoSection = HelpTab:CreateSection({Name = "How It Works", Side = "Left"})
 
 InfoSection:CreateLabel("ESP: Shows players through walls with boxes/highlights and health bars")
-InfoSection:CreateLabel("Aimbot: Hold right-click to lock onto targets. FOV = detection range circle")
+InfoSection:CreateLabel("Aimbot: FOV circle always shows when aimbot is ON")
 InfoSection:CreateLabel("Target Everyone OFF = aims at killer only. ON = aims at anyone")
 InfoSection:CreateLabel("Noclip: Walk through walls. Press G to toggle instantly")
-InfoSection:CreateLabel("Sprint: Hold Shift for speed 20, release for speed 15")
+InfoSection:CreateLabel("Sprint: Hold Shift (PC) or tap button (Mobile) for speed 20")
 InfoSection:CreateLabel("Light Helmet: Adds a light to your head for dark maps")
+InfoSection:CreateLabel("No Jump Cooldown: Always active, jump immediately after landing")
 
 --------------------------------------------------------------------------------
---// KEYBINDS
+--// KEYBINDS (PC only)
 --------------------------------------------------------------------------------
 table.insert(Connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     if UserInputService:GetFocusedTextBox() then return end
 
-    -- F = Toggle Aimbot
     if input.KeyCode == Enum.KeyCode.F then
         AimbotEnabled = not AimbotEnabled
+        UpdateMobileButtonVisibility()
         Library:Notify({
             Title = "Aimbot",
             Content = AimbotEnabled and "Enabled" or "Disabled",
@@ -935,7 +1166,6 @@ table.insert(Connections, UserInputService.InputBegan:Connect(function(input, ga
         })
     end
 
-    -- B = Toggle Target Everyone
     if input.KeyCode == Enum.KeyCode.B then
         AimbotTargetEveryone = not AimbotTargetEveryone
         Library:Notify({
@@ -946,7 +1176,6 @@ table.insert(Connections, UserInputService.InputBegan:Connect(function(input, ga
         })
     end
 
-    -- H = Toggle Light Helmet
     if input.KeyCode == Enum.KeyCode.H then
         LightHelmetEnabled = not LightHelmetEnabled
         ToggleLightHelmet(LightHelmetEnabled)
@@ -958,7 +1187,6 @@ table.insert(Connections, UserInputService.InputBegan:Connect(function(input, ga
         })
     end
 
-    -- G = Toggle Noclip
     if input.KeyCode == Enum.KeyCode.G then
         ToggleNoclip(not NoclipEnabled)
         Library:Notify({
@@ -969,14 +1197,12 @@ table.insert(Connections, UserInputService.InputBegan:Connect(function(input, ga
         })
     end
 
-    -- Shift = Start Sprint
-    if input.KeyCode == Enum.KeyCode.LeftShift and SprintEnabled then
+    if input.KeyCode == Enum.KeyCode.LeftShift and SprintEnabled and not IsMobile then
         StartSprint()
     end
 end))
 
 table.insert(Connections, UserInputService.InputEnded:Connect(function(input)
-    -- Shift released = Stop Sprint
     if input.KeyCode == Enum.KeyCode.LeftShift and SprintHeld then
         StopSprint()
     end
@@ -993,14 +1219,27 @@ table.insert(Connections, RunService.RenderStepped:Connect(function()
         UpdateESP()
     end
 
-    -- FOV Circle
+    -- FOV Circle (always shown when aimbot is on, regardless of aim button state)
     UpdateFOVCircle()
 
-    -- Aimbot (hold right mouse button to aim)
-    if AimbotEnabled and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+    -- PC aimbot: hold RMB
+    local pcAiming = not IsMobile and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    -- Mobile aimbot: hold the on-screen button
+    local mobileAiming = IsMobile and MobileAimActive
+
+    if AimbotEnabled and (pcAiming or mobileAiming) then
         local target = GetAimbotTarget()
         if target then
             AimAt(target)
+        end
+        -- Color the mobile aim button red while actively aiming
+        if IsMobile then
+            AimBtnFrame.BackgroundColor3 = Color3.fromRGB(200, 30, 30)
+        end
+    else
+        -- Restore aim button to neutral color
+        if IsMobile then
+            AimBtnFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
         end
     end
 end))
@@ -1012,7 +1251,9 @@ LoadWeaponNames()
 
 Library:Notify({
     Title = "Masacre Script",
-    Content = "Loaded! F:Aimbot B:TargetAll H:Light G:Noclip",
+    Content = IsMobile
+        and "Loaded! Mobile mode active. Enable features to show buttons."
+        or  "Loaded! F:Aimbot B:TargetAll H:Light G:Noclip",
     Emoji = "🔥",
     Duration = 5
 })
