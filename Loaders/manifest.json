@@ -17,7 +17,7 @@
     {
       "name": "Hollow Point",
       "placeId": "16911289637",
-      "universal": "false",
+      "universal": false,
       "description": "Hollow point script , with ESP , Aimbot , NightVision , Aim-Direction Warning/SpiderSense ",
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/HollowPoint.lua"
     },
@@ -87,6 +87,7 @@
   ]
 
 }
+
 
 
 
