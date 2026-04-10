@@ -29,6 +29,13 @@
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/UIDumperAlpha.lua"
     },
     {
+      "name": "CarSPM",
+      "placeId": "universal",
+      "universal": true,
+      "description": "Car Speed Manager",
+      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/CarSPM"
+    },
+    {
       "name": "Blox Fruits (in progress)",
       "placeId": "2753915549",
       "universal": false,
