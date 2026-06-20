@@ -78,6 +78,13 @@
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/ParkourRecorder.lua"
     },
     {
+      "name": "Operation one",
+      "placeId": "72920620366355",
+      "universal": false,
+      "description": "Operation One , esp and aimbot",
+      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/OperationOne.lua"
+    },
+    {
       "name": "Weaponary",
       "placeId": "3297964905",
       "universal": false,
