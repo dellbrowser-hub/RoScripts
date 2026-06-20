@@ -84,6 +84,13 @@
       "description": "Operation One , esp and aimbot",
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/OperationOne.lua"
     },
+     {
+      "name": "Video Recorder",
+      "placeId": "universal",
+      "universal": true,
+      "description": "A script that help you record videos",
+      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/VideoRecorder.lua"
+    },
     {
       "name": "Weaponary",
       "placeId": "3297964905",
