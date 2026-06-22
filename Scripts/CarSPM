@@ -1,0 +1,464 @@
+-- Car Speed Manager - RenLib Version (Perfect Base + NPC Vehicle Tab)
+-- Config saved to: RenHub/CarSPM/config.json
+
+-- Load RenLib
+local RenLib = RenLib or loadstring(game:HttpGet("https://raw.githubusercontent.com/xsakyx/RobloxUILib/main/RenLib.lua"))()
+
+-- Services
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local rootPart = character:WaitForChild("HumanoidRootPart")
+
+-- Config path
+local configFolder = "RenHub"
+local configSubFolder = "CarSPM"
+local configFile = configFolder .. "/" .. configSubFolder .. "/config.json"
+
+if not isfolder(configFolder) then makefolder(configFolder) end
+if not isfolder(configFolder .. "/" .. configSubFolder) then makefolder(configFolder .. "/" .. configSubFolder) end
+
+-- ===============================
+-- FORCE RESET OLD BROKEN CONFIG (uncomment ONCE if needed)
+-- ===============================
+-- delfile(configFile)
+
+-- Default settings
+local Settings = {
+    AddAmount = 10,
+    MaxVelocity = 500,
+    KeybindsEnabled = false,
+    SpeedUnit = "KMH",
+    NPCVehiclesEnabled = false,   -- false = folder exists, true = folder deleted
+}
+
+-- Keybinds (safe defaults)
+local Keybinds = {
+    SpeedUp = Enum.KeyCode.PageUp,
+    SpeedDown = Enum.KeyCode.PageDown,
+    Brake = Enum.KeyCode.RightControl,
+    InstantBrake = Enum.KeyCode.Delete,
+    Unreal = Enum.KeyCode.End,
+}
+
+-- State
+local holding = {
+    SpeedUp = false,
+    SpeedDown = false,
+    Brake = false,
+    InstantBrake = false,
+    Unreal = false,
+}
+
+local listeningFor = nil
+local listenConnection = nil
+
+-- ===============================
+-- NPC VEHICLE HELPER
+-- ===============================
+local function applyNPCVehiclesState()
+    local npcVehicles = Workspace:FindFirstChild("NPCVehicles")
+    local vehiclesFolder = npcVehicles and npcVehicles:FindFirstChild("Vehicles")
+    
+    if Settings.NPCVehiclesEnabled then
+        -- Toggle ON: delete the Vehicles folder
+        if vehiclesFolder then
+            vehiclesFolder:Destroy()
+        end
+    else
+        -- Toggle OFF: create the folder structure
+        if not npcVehicles then
+            npcVehicles = Instance.new("Folder")
+            npcVehicles.Name = "NPCVehicles"
+            npcVehicles.Parent = Workspace
+        end
+        if not vehiclesFolder then
+            local newFolder = Instance.new("Folder")
+            newFolder.Name = "Vehicles"
+            newFolder.Parent = npcVehicles
+        end
+    end
+end
+
+-- ===============================
+-- SPEED HELPERS
+-- ===============================
+local function studsToMph(studs) return studs * 0.621371 end
+local function mphToStuds(mph) return mph / 0.621371 end
+
+local function getRawSpeed()
+    if not rootPart then return 0 end
+    local vel = rootPart.AssemblyLinearVelocity
+    local forward = rootPart.CFrame.LookVector
+    return vel:Dot(forward)
+end
+
+local function getDisplaySpeed()
+    local raw = getRawSpeed()
+    if Settings.SpeedUnit == "MPH" then
+        return studsToMph(raw)
+    else
+        return raw
+    end
+end
+
+local function applyThrottle(amount)
+    if not rootPart then return end
+    local vel = rootPart.AssemblyLinearVelocity
+    local forward = rootPart.CFrame.LookVector
+    local signedSpeed = vel:Dot(forward)
+    local newSpeed = math.clamp(signedSpeed + amount, -Settings.MaxVelocity, Settings.MaxVelocity)
+    local sideVel = vel - forward * signedSpeed
+    rootPart.AssemblyLinearVelocity = forward * newSpeed + sideVel
+end
+
+local function smoothBrake()
+    if not rootPart then return end
+    local vel = rootPart.AssemblyLinearVelocity
+    local forward = rootPart.CFrame.LookVector
+    local signedSpeed = vel:Dot(forward)
+    local amount = Settings.AddAmount
+    if math.abs(signedSpeed) <= amount then
+        signedSpeed = 0
+    else
+        if signedSpeed > 0 then
+            signedSpeed = signedSpeed - amount
+        else
+            signedSpeed = signedSpeed + amount
+        end
+    end
+    local sideVel = vel - forward * vel:Dot(forward)
+    rootPart.AssemblyLinearVelocity = forward * signedSpeed + sideVel
+end
+
+local function instantBrake()
+    if not rootPart then return end
+    local vel = rootPart.AssemblyLinearVelocity
+    local forward = rootPart.CFrame.LookVector
+    local sideVel = vel - forward * (vel:Dot(forward))
+    rootPart.AssemblyLinearVelocity = sideVel
+end
+
+local function unrealAccel()
+    if not rootPart then return end
+    local vel = rootPart.AssemblyLinearVelocity
+    local forward = rootPart.CFrame.LookVector
+    local sideVel = vel - forward * (vel:Dot(forward))
+    rootPart.AssemblyLinearVelocity = forward * Settings.MaxVelocity + sideVel
+end
+
+player.CharacterAdded:Connect(function(c)
+    character = c
+    rootPart = c:WaitForChild("HumanoidRootPart")
+end)
+
+-- Main action loop
+RunService.Heartbeat:Connect(function()
+    if holding.SpeedUp then applyThrottle(Settings.AddAmount) end
+    if holding.SpeedDown then applyThrottle(-Settings.AddAmount) end
+    if holding.Brake then smoothBrake() end
+    if holding.InstantBrake then instantBrake() end
+    if holding.Unreal then unrealAccel() end
+end)
+
+-- ===============================
+-- SAVE / LOAD CONFIG
+-- ===============================
+local function saveConfig()
+    local data = {
+        Settings = Settings,
+        Keybinds = {
+            SpeedUp = Keybinds.SpeedUp.Name,
+            SpeedDown = Keybinds.SpeedDown.Name,
+            Brake = Keybinds.Brake.Name,
+            InstantBrake = Keybinds.InstantBrake.Name,
+            Unreal = Keybinds.Unreal.Name,
+        }
+    }
+    writefile(configFile, HttpService:JSONEncode(data))
+end
+
+local function loadConfig()
+    if not isfile(configFile) then
+        saveConfig()
+        applyNPCVehiclesState()
+        return
+    end
+    local success, data = pcall(function()
+        return HttpService:JSONDecode(readfile(configFile))
+    end)
+    if not success or not data then
+        delfile(configFile)
+        saveConfig()
+        applyNPCVehiclesState()
+        return
+    end
+    if data.Settings then
+        for k, v in pairs(data.Settings) do
+            Settings[k] = v
+        end
+    end
+    local kb = data.Keybinds or {}
+    if kb.SpeedUp and Enum.KeyCode[kb.SpeedUp] then Keybinds.SpeedUp = Enum.KeyCode[kb.SpeedUp] end
+    if kb.SpeedDown and Enum.KeyCode[kb.SpeedDown] then Keybinds.SpeedDown = Enum.KeyCode[kb.SpeedDown] end
+    if kb.Brake and Enum.KeyCode[kb.Brake] then Keybinds.Brake = Enum.KeyCode[kb.Brake] end
+    if kb.InstantBrake and Enum.KeyCode[kb.InstantBrake] then Keybinds.InstantBrake = Enum.KeyCode[kb.InstantBrake] end
+    if kb.Unreal and Enum.KeyCode[kb.Unreal] then Keybinds.Unreal = Enum.KeyCode[kb.Unreal] end
+    saveConfig()
+    applyNPCVehiclesState()
+end
+
+loadConfig()
+
+-- ===============================
+-- CREATE UI
+-- ===============================
+local Window = RenLib:CreateWindow({ Name = "Car Speed Manager" })
+
+-- Main Control Tab
+local mainTab = Window:CreateTab({ Name = "Control", Emoji = "🚗" })
+local settingsSection = mainTab:CreateSection({ Name = "Settings" })
+
+local stepSlider = settingsSection:CreateSlider({
+    Name = "Step Amount (" .. Settings.SpeedUnit .. ")",
+    Min = 1, Max = 100, Default = Settings.AddAmount,
+    Callback = function(v) Settings.AddAmount = v; saveConfig() end
+})
+
+local maxSlider = settingsSection:CreateSlider({
+    Name = "Max Speed (" .. Settings.SpeedUnit .. ")",
+    Min = 50, Max = 2000, Default = Settings.MaxVelocity,
+    Callback = function(v) Settings.MaxVelocity = v; saveConfig() end
+})
+
+settingsSection:CreateToggle({
+    Name = "Use MPH (otherwise KM/H)",
+    Default = (Settings.SpeedUnit == "MPH"),
+    Callback = function(val)
+        if val then
+            Settings.SpeedUnit = "MPH"
+            Settings.AddAmount = studsToMph(Settings.AddAmount)
+            Settings.MaxVelocity = studsToMph(Settings.MaxVelocity)
+        else
+            Settings.SpeedUnit = "KMH"
+            Settings.AddAmount = mphToStuds(Settings.AddAmount)
+            Settings.MaxVelocity = mphToStuds(Settings.MaxVelocity)
+        end
+        stepSlider:Set(Settings.AddAmount)
+        maxSlider:Set(Settings.MaxVelocity)
+        stepSlider:SetText("Step Amount (" .. Settings.SpeedUnit .. ")")
+        maxSlider:SetText("Max Speed (" .. Settings.SpeedUnit .. ")")
+        saveConfig()
+    end
+})
+
+local actionSection = mainTab:CreateSection({ Name = "Actions (hold for continuous)" })
+local btnSpeedUp = actionSection:CreateButton({ Name = "➕ Speed Up" })
+local btnSpeedDown = actionSection:CreateButton({ Name = "➖ Speed Down" })
+local btnBrake = actionSection:CreateButton({ Name = "🛑 Brake" })
+local btnInstantBrake = actionSection:CreateButton({ Name = "⏹️ Instant Brake" })
+local btnUnreal = actionSection:CreateButton({ Name = "🚀 Unreal" })
+
+local displaySection = mainTab:CreateSection({ Name = "Live Speed" })
+local speedLabel = displaySection:CreateLabel("Speed: 0 " .. Settings.SpeedUnit)
+RunService.RenderStepped:Connect(function()
+    if rootPart then
+        speedLabel:SetText(string.format("Speed: %.1f %s", getDisplaySpeed(), Settings.SpeedUnit))
+    else
+        speedLabel:SetText("Speed: N/A")
+    end
+end)
+
+-- ===============================
+-- UI BUTTON HOLD
+-- ===============================
+local function findButtonByText(parent, text)
+    for _, child in ipairs(parent:GetChildren()) do
+        if child:IsA("TextButton") and child.Text == text then
+            return child
+        end
+        local found = findButtonByText(child, text)
+        if found then return found end
+    end
+    return nil
+end
+
+task.wait(0.2)
+local screenGui = RenLib.ScreenGui
+if screenGui then
+    local function addHold(btnText, action)
+        local btn = findButtonByText(screenGui, btnText)
+        if btn then
+            btn.MouseButton1Down:Connect(function() holding[action] = true end)
+            btn.MouseButton1Up:Connect(function() holding[action] = false end)
+            btn.MouseLeave:Connect(function() holding[action] = false end)
+        end
+    end
+    addHold("➕ Speed Up", "SpeedUp")
+    addHold("➖ Speed Down", "SpeedDown")
+    addHold("🛑 Brake", "Brake")
+    addHold("⏹️ Instant Brake", "InstantBrake")
+    addHold("🚀 Unreal", "Unreal")
+end
+
+-- ===============================
+-- KEYBINDS TAB
+-- ===============================
+local keyTab = Window:CreateTab({ Name = "Keybinds", Emoji = "⌨️" })
+local keySection = keyTab:CreateSection({ Name = "Keybind Settings" })
+
+local toggleObj = keySection:CreateToggle({
+    Name = "Enable Keybinds",
+    Default = Settings.KeybindsEnabled,
+    Callback = function(v)
+        Settings.KeybindsEnabled = v
+        saveConfig()
+        if not v then
+            for k in pairs(holding) do holding[k] = false end
+        end
+    end
+})
+
+local keybindButtons = {}
+local function updateKeybindButtonText(actionName)
+    local btn = keybindButtons[actionName]
+    if btn and btn.SetText then
+        local displayName = actionName:gsub("(%l)(%u*)", function(a,b) return a:upper()..b end)
+        if actionName == "SpeedUp" then displayName = "Speed Up"
+        elseif actionName == "SpeedDown" then displayName = "Speed Down"
+        elseif actionName == "InstantBrake" then displayName = "Instant Brake"
+        else displayName = actionName end
+        btn:SetText(string.format("%s (current: %s)", displayName, Keybinds[actionName].Name))
+    end
+end
+
+local actions = {"SpeedUp", "SpeedDown", "Brake", "InstantBrake", "Unreal"}
+local displayNames = {
+    SpeedUp = "Speed Up",
+    SpeedDown = "Speed Down",
+    Brake = "Brake",
+    InstantBrake = "Instant Brake",
+    Unreal = "Unreal"
+}
+
+for _, action in ipairs(actions) do
+    local btn = keySection:CreateButton({
+        Name = string.format("%s (current: %s)", displayNames[action], Keybinds[action].Name),
+        Callback = function()
+            if not Settings.KeybindsEnabled then
+                RenLib:Notify({ Title = "Keybinds disabled", Content = "Enable keybinds first", Emoji = "⚠️", Duration = 2 })
+                return
+            end
+            listeningFor = action
+            RenLib:Notify({ Title = "Listening", Content = "Press any key for " .. displayNames[action], Emoji = "⌨️", Duration = 3 })
+            if listenConnection then listenConnection:Disconnect() end
+            listenConnection = UserInputService.InputBegan:Connect(function(input, gpe)
+                if gpe then return end
+                if input.UserInputType == Enum.UserInputType.Keyboard then
+                    local newKey = input.KeyCode
+                    Keybinds[action] = newKey
+                    updateKeybindButtonText(action)
+                    RenLib:Notify({ Title = "Key set", Content = displayNames[action] .. " → " .. newKey.Name, Emoji = "✅", Duration = 2 })
+                    saveConfig()
+                    if listenConnection then listenConnection:Disconnect() end
+                    listenConnection = nil
+                    listeningFor = nil
+                end
+            end)
+        end
+    })
+    keybindButtons[action] = btn
+end
+
+-- ===============================
+-- NPC VEHICLE TAB (NEW)
+-- ===============================
+local npcTab = Window:CreateTab({ Name = "NPC Vehicle", Emoji = "🚛" })
+local npcSection = npcTab:CreateSection({ Name = "NPC Vehicle Misc" })
+
+npcSection:CreateToggle({
+    Name = "Toggle NPC Vehicles (Midnight Chasers only)",
+    Default = Settings.NPCVehiclesEnabled,
+    Callback = function(val)
+        Settings.NPCVehiclesEnabled = val
+        saveConfig()
+        applyNPCVehiclesState()
+        if val then
+            RenLib:Notify({ Title = "NPC Vehicles Hidden", Content = "Vehicles deleted", Emoji = "🗑️", Duration = 2 })
+        else
+            RenLib:Notify({ Title = "NPC Vehicles Cant be restored", Content = "disable feature and rejoin the game", Emoji = "❌", Duration = 2 })
+        end
+    end
+})
+
+-- ===============================
+-- KEYBIND HOLD PROCESSING
+-- ===============================
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if not Settings.KeybindsEnabled then return end
+    if listeningFor then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    
+    local key = input.KeyCode
+    if key == Keybinds.SpeedUp then
+        holding.SpeedUp = true
+    elseif key == Keybinds.SpeedDown then
+        holding.SpeedDown = true
+    elseif key == Keybinds.Brake then
+        holding.Brake = true
+    elseif key == Keybinds.InstantBrake then
+        holding.InstantBrake = true
+    elseif key == Keybinds.Unreal then
+        holding.Unreal = true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gpe)
+    if gpe then return end
+    if not Settings.KeybindsEnabled then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    
+    local key = input.KeyCode
+    if key == Keybinds.SpeedUp then
+        holding.SpeedUp = false
+    elseif key == Keybinds.SpeedDown then
+        holding.SpeedDown = false
+    elseif key == Keybinds.Brake then
+        holding.Brake = false
+    elseif key == Keybinds.InstantBrake then
+        holding.InstantBrake = false
+    elseif key == Keybinds.Unreal then
+        holding.Unreal = false
+    end
+end)
+
+-- Notify ready
+RenLib:Notify({
+    Title = "Car Speed Manager Ready",
+    Content = "Hold buttons or keybinds (if enabled). Max speed: 2000",
+    Emoji = "🚗",
+    Duration = 3
+})
+
+
+-- ===============================
+-- WARNING POPUP - BAN RISK NOTICE
+-- ===============================
+local function showWarningPopup()
+	Window:Dialog({
+		Title = "Ban risk warning",
+		Content = "This script changes vehicle speed beyond normal game limits. Speed manipulation may be detected by anti-cheat systems and can lead to a ban. Use it only where you understand and accept the risk; the RenHub team is not responsible for account penalties.",
+		Actions = {
+			{Name = "Close"},
+			{Name = "I understand", Primary = true}
+		}
+	})
+end
+-- Show the warning popup
+showWarningPopup()
