@@ -14,6 +14,13 @@
       "description": "Hollow point script , with ESP , Aimbot , NightVision , Aim-Direction Warning/SpiderSense ",
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/HollowPoint.lua"
     },
+    {
+      "name": "Fisch",
+      "placeId": "16732694052",
+      "universal": false,
+      "description": "A fisch script that has auto farming in it , it bypasses the anticheat by impersonating macro-like behaviour ",
+      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/Fish.lua"
+    },
      {
       "name": "UI Dumper (Alpha)",
       "placeId": "universal",
