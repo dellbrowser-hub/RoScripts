@@ -57,8 +57,8 @@ if not Library then
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification", {
             Title = "Script Hub Error",
-            Text = failure,
-            Duration = 7
+            Text = "UI library failed during " .. tostring(libStage) .. ". Check the console.",
+            Duration = 5
         })
     end)
     return false, failure
@@ -322,10 +322,13 @@ if not winSuccess or not Window then
     local failure = "Failed to create UI window: " .. tostring(winErr)
     warn("[Script Hub] " .. failure)
     pcall(function()
+        Library:Unload("window creation failed")
+    end)
+    pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification", {
             Title = "Script Hub Error",
-            Text = failure,
-            Duration = 7
+            Text = "The UI window could not start. Check the console.",
+            Duration = 5
         })
     end)
     return false, failure
@@ -333,7 +336,7 @@ end
 
 local MainTab = Window:CreateTab({
     Name = "Scripts",
-    Icon = "rbxassetid://73350721735790"
+    Icon = (Library.Icons and Library.Icons.Layers) or "rbxassetid://6034328955"
 })
 
 -------------------------------------------------------------------------------
