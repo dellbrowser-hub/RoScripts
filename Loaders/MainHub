@@ -7,20 +7,61 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 
 --// LOAD UI LIBRARY
-local Library = nil
-local libSuccess, libErr = pcall(function()
-    local libContent = game:HttpGet("https://raw.githubusercontent.com/xsakyx/RobloxUILib/main/RenLibBêta.lua")
-    Library = loadstring(libContent)()
-end)
+local function loadUILibrary()
+    local libraryUrl = "https://raw.githubusercontent.com/xsakyx/RobloxUILib/main/RenLibB%C3%AAta.lua"
 
-if not libSuccess or not Library then
-    warn("[Script Hub] Failed to load UI Library: " .. tostring(libErr))
-    game:GetService("StarterGui"):SetCore("SendNotification", {
-        Title = "Script Hub Error",
-        Text = "Failed to load UI library",
-        Duration = 5
-    })
-    return
+    print("[Script Hub] UI library stage: fetch")
+    local fetchOk, libContent = pcall(function()
+        return game:HttpGet(libraryUrl)
+    end)
+    if not fetchOk then
+        return nil, "fetch", libContent
+    end
+    if type(libContent) ~= "string" or libContent == "" then
+        return nil, "fetch", "empty or non-text response"
+    end
+    if libContent:sub(1, 3) == "\239\187\191" then
+        libContent = libContent:sub(4)
+    end
+
+    if type(loadstring) ~= "function" then
+        return nil, "compile", "loadstring is unavailable"
+    end
+
+    print("[Script Hub] UI library stage: compile (" .. #libContent .. " bytes)")
+    local compilerOk, chunk, compileErr = pcall(loadstring, libContent)
+    if not compilerOk then
+        return nil, "compiler call", chunk
+    end
+    if type(chunk) ~= "function" then
+        return nil, "compile", compileErr or "compiler returned no function"
+    end
+
+    print("[Script Hub] UI library stage: execute")
+    local executeOk, libraryOrError = pcall(chunk)
+    if not executeOk then
+        return nil, "execute", libraryOrError
+    end
+    if type(libraryOrError) ~= "table" then
+        return nil, "execute", "library returned " .. type(libraryOrError) .. ", expected table"
+    end
+
+    print("[Script Hub] UI library initialized")
+    return libraryOrError
+end
+
+local Library, libStage, libErr = loadUILibrary()
+if not Library then
+    local failure = "UI library " .. tostring(libStage) .. " failed: " .. tostring(libErr)
+    warn("[Script Hub] " .. failure)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Script Hub Error",
+            Text = failure,
+            Duration = 7
+        })
+    end)
+    return false, failure
 end
 
 --// CONFIGURATION
@@ -278,13 +319,16 @@ local winSuccess, winErr = pcall(function()
 end)
 
 if not winSuccess or not Window then
-    warn("[Script Hub] Failed to create window: " .. tostring(winErr))
-    game:GetService("StarterGui"):SetCore("SendNotification", {
-        Title = "Script Hub Error",
-        Text = "Failed to create UI window",
-        Duration = 5
-    })
-    return
+    local failure = "Failed to create UI window: " .. tostring(winErr)
+    warn("[Script Hub] " .. failure)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Script Hub Error",
+            Text = failure,
+            Duration = 7
+        })
+    end)
+    return false, failure
 end
 
 local MainTab = Window:CreateTab({
@@ -498,3 +542,5 @@ ExecuteScript = function(scriptData)
     
     print("[Script Hub] Closed after script execution")
 end
+
+return true
