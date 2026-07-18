@@ -1,5 +1,5 @@
 -------------------------------------------------------------------------------
---! RenCore - ULTIMATE SCRIPT HUB
+--! SCRIPT HUB - DOMINATION UI (FULLY FIXED)
 -------------------------------------------------------------------------------
 
 --// SERVICES
@@ -7,20 +7,61 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 
 --// LOAD UI LIBRARY
-local Library = nil
-local libSuccess, libErr = pcall(function()
-    local libContent = game:HttpGet("https://raw.githubusercontent.com/xsakyx/RobloxUILib/main/RenLibBêta.lua")
-    Library = loadstring(libContent)()
-end)
+local function loadUILibrary()
+    local libraryUrl = "https://raw.githubusercontent.com/xsakyx/RobloxUILib/main/RenLibB%C3%AAta.lua"
 
-if not libSuccess or not Library then
-    warn("[RenCore] Failed to load UI Library: " .. tostring(libErr))
-    game:GetService("StarterGui"):SetCore("SendNotification", {
-        Title = "RenCore Error",
-        Text = "Failed to load UI library",
-        Duration = 5
-    })
-    return
+    print("[Script Hub] UI library stage: fetch")
+    local fetchOk, libContent = pcall(function()
+        return game:HttpGet(libraryUrl)
+    end)
+    if not fetchOk then
+        return nil, "fetch", libContent
+    end
+    if type(libContent) ~= "string" or libContent == "" then
+        return nil, "fetch", "empty or non-text response"
+    end
+    if libContent:sub(1, 3) == "\239\187\191" then
+        libContent = libContent:sub(4)
+    end
+
+    if type(loadstring) ~= "function" then
+        return nil, "compile", "loadstring is unavailable"
+    end
+
+    print("[Script Hub] UI library stage: compile (" .. #libContent .. " bytes)")
+    local compilerOk, chunk, compileErr = pcall(loadstring, libContent)
+    if not compilerOk then
+        return nil, "compiler call", chunk
+    end
+    if type(chunk) ~= "function" then
+        return nil, "compile", compileErr or "compiler returned no function"
+    end
+
+    print("[Script Hub] UI library stage: execute")
+    local executeOk, libraryOrError = pcall(chunk)
+    if not executeOk then
+        return nil, "execute", libraryOrError
+    end
+    if type(libraryOrError) ~= "table" then
+        return nil, "execute", "library returned " .. type(libraryOrError) .. ", expected table"
+    end
+
+    print("[Script Hub] UI library initialized")
+    return libraryOrError
+end
+
+local Library, libStage, libErr = loadUILibrary()
+if not Library then
+    local failure = "UI library " .. tostring(libStage) .. " failed: " .. tostring(libErr)
+    warn("[Script Hub] " .. failure)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Script Hub Error",
+            Text = failure,
+            Duration = 7
+        })
+    end)
+    return false, failure
 end
 
 --// CONFIGURATION
@@ -47,19 +88,18 @@ local TotalScriptsLabel = nil
 local TotalFavoritesLabel = nil
 
 --// FILES
-local FAVORITES_FILE = "RenCore_Favorites.json"
+local FAVORITES_FILE = "ScriptHub_Favorites.json"
 
 -------------------------------------------------------------------------------
 --// UTILITY FUNCTIONS
 -------------------------------------------------------------------------------
-local function SafeNotify(title, content, duration, emoji)
-    if Library and Library.Notify then
+local function SafeNotify(title, content, duration)
+    if Window and Library and Library.Notify then
         pcall(function()
             Library:Notify({
                 Title = title,
                 Content = content,
-                Duration = duration or 3,
-                Emoji = emoji or "ℹ️"
+                Duration = duration or 3
             })
         end)
     end
@@ -127,7 +167,7 @@ local function FetchManifest()
     end)
     
     if not success then
-        SafeNotify("Connection Error", "Failed to fetch manifest", 5, "❌")
+        SafeNotify("Connection Error", "Failed to fetch manifest", 5)
         return false
     end
     
@@ -136,7 +176,7 @@ local function FetchManifest()
     end)
     
     if not parseSuccess or not data or not data.scripts then
-        SafeNotify("Parse Error", "Invalid manifest.json", 5, "❌")
+        SafeNotify("Parse Error", "Invalid manifest.json", 5)
         return false
     end
     
@@ -207,11 +247,11 @@ end
 -------------------------------------------------------------------------------
 local function ExecuteScript(scriptData)
     if not scriptData or not scriptData.loadstring then
-        SafeNotify("Error", "Invalid script data", 3, "❌")
+        SafeNotify("Error", "Invalid script data", 3)
         return
     end
     
-    SafeNotify("Executing...", "Loading: " .. scriptData.name, 2, "⚡")
+    SafeNotify("Executing...", "Loading: " .. scriptData.name, 2)
     
     task.spawn(function()
         local success, err = pcall(function()
@@ -220,10 +260,10 @@ local function ExecuteScript(scriptData)
         end)
         
         if success then
-            SafeNotify("Success", scriptData.name .. " loaded!", 3, "✅")
+            SafeNotify("Success", scriptData.name .. " loaded!", 3)
         else
-            SafeNotify("Error", "Failed to execute script", 5, "❌")
-            warn("[RenCore] Error: " .. tostring(err))
+            SafeNotify("Error", "Failed to execute script", 5)
+            warn("[Script Hub] Error: " .. tostring(err))
         end
     end)
 end
@@ -234,7 +274,7 @@ end
 local function AutoLaunchCurrentGame()
     for _, script in pairs(ScriptDatabase) do
         if script and script.placeId == CurrentPlaceId and not script.universal then
-            SafeNotify("Auto-Launch", "Found: " .. script.name, 2, "🚀")
+            SafeNotify("Auto-Launch", "Found: " .. script.name, 2)
             task.wait(0.5)
             ExecuteScript(script)
             return true
@@ -243,14 +283,14 @@ local function AutoLaunchCurrentGame()
     
     for _, script in pairs(ScriptDatabase) do
         if script and script.universal then
-            SafeNotify("Universal Script", "Launching: " .. script.name, 2, "🚀")
+            SafeNotify("Universal Script", "Launching: " .. script.name, 2)
             task.wait(0.5)
             ExecuteScript(script)
             return true
         end
     end
     
-    SafeNotify("No Script Found", "No compatible script for this game", 4, "⚠️")
+    SafeNotify("No Script Found", "No compatible script for this game", 4)
     return false
 end
 
@@ -261,7 +301,7 @@ LoadFavorites()
 local manifestLoaded = FetchManifest()
 
 if not manifestLoaded then
-    warn("[RenCore] Failed to load manifest")
+    warn("[Script Hub] Failed to load manifest")
     ScriptDatabase = {}
 end
 
@@ -270,24 +310,30 @@ end
 -------------------------------------------------------------------------------
 local winSuccess, winErr = pcall(function()
     Window = Library:CreateWindow({
-        Name = "RenCore"
+        Name = "Script Hub",
+        LoadingTitle = "Initializing...",
+        ConfigurationSaving = {
+            Enabled = false
+        }
     })
 end)
 
 if not winSuccess or not Window then
-    warn("[RenCore] Failed to create window: " .. tostring(winErr))
-    game:GetService("StarterGui"):SetCore("SendNotification", {
-        Title = "RenCore Error",
-        Text = "Failed to create UI window",
-        Duration = 5
-    })
-    return
+    local failure = "Failed to create UI window: " .. tostring(winErr)
+    warn("[Script Hub] " .. failure)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Script Hub Error",
+            Text = failure,
+            Duration = 7
+        })
+    end)
+    return false, failure
 end
 
--- MAIN SCRIPTS TAB
 local MainTab = Window:CreateTab({
     Name = "Scripts",
-    Emoji = "📜"
+    Icon = "rbxassetid://73350721735790"
 })
 
 -------------------------------------------------------------------------------
@@ -349,7 +395,7 @@ AllScriptsSection:CreateButton({
         if SelectedScript then
             ExecuteScript(SelectedScript)
         else
-            SafeNotify("Error", "Please select a script first", 3, "❌")
+            SafeNotify("Error", "Please select a script first", 3)
         end
     end
 })
@@ -359,7 +405,7 @@ AllScriptsSection:CreateButton({
     Callback = function()
         if SelectedScript then
             if AddFavorite(SelectedScript.name) then
-                SafeNotify("Success", "Added to favorites!", 2, "⭐")
+                SafeNotify("Success", "Added to favorites!", 2)
                 if FavDropdown then
                     pcall(function() FavDropdown:Refresh(GetFavoritesList()) end)
                 end
@@ -367,10 +413,10 @@ AllScriptsSection:CreateButton({
                     pcall(function() TotalFavoritesLabel:SetText("Total Favorites: " .. #Favorites) end)
                 end
             else
-                SafeNotify("Info", "Already in favorites", 2, "ℹ️")
+                SafeNotify("Info", "Already in favorites", 2)
             end
         else
-            SafeNotify("Error", "Please select a script first", 3, "❌")
+            SafeNotify("Error", "Please select a script first", 3)
         end
     end
 })
@@ -410,7 +456,7 @@ FavoritesSection:CreateButton({
         if SelectedFavorite then
             ExecuteScript(SelectedFavorite)
         else
-            SafeNotify("Error", "Please select a favorite first", 3, "❌")
+            SafeNotify("Error", "Please select a favorite first", 3)
         end
     end
 })
@@ -421,7 +467,7 @@ FavoritesSection:CreateButton({
         if SelectedFavorite then
             local name = SelectedFavorite.name
             if RemoveFavorite(name) then
-                SafeNotify("Success", "Removed from favorites!", 2, "✅")
+                SafeNotify("Success", "Removed from favorites!", 2)
                 pcall(function() FavDropdown:Refresh(GetFavoritesList()) end)
                 pcall(function() FavInfoLabel:SetText("Select a favorite to view details") end)
                 SelectedFavorite = nil
@@ -430,7 +476,7 @@ FavoritesSection:CreateButton({
                 end
             end
         else
-            SafeNotify("Error", "Please select a favorite first", 3, "❌")
+            SafeNotify("Error", "Please select a favorite first", 3)
         end
     end
 })
@@ -450,7 +496,7 @@ InfoSection:CreateLabel("User: " .. LocalPlayer.Name)
 InfoSection:CreateButton({
     Name = "🔄 Refresh Script List",
     Callback = function()
-        SafeNotify("Refreshing...", "Fetching latest scripts", 2, "🔄")
+        SafeNotify("Refreshing...", "Fetching latest scripts", 2)
         
         task.spawn(function()
             if FetchManifest() then
@@ -458,9 +504,9 @@ InfoSection:CreateButton({
                 pcall(function() FavDropdown:Refresh(GetFavoritesList()) end)
                 pcall(function() TotalScriptsLabel:SetText("Total Scripts: " .. #ScriptDatabase) end)
                 pcall(function() TotalFavoritesLabel:SetText("Total Favorites: " .. #Favorites) end)
-                SafeNotify("Success", "Script list updated!", 3, "✅")
+                SafeNotify("Success", "Script list updated!", 3)
             else
-                SafeNotify("Error", "Failed to refresh scripts", 3, "❌")
+                SafeNotify("Error", "Failed to refresh scripts", 3)
             end
         end)
     end
@@ -469,9 +515,32 @@ InfoSection:CreateButton({
 -------------------------------------------------------------------------------
 --// STARTUP
 -------------------------------------------------------------------------------
-SafeNotify("RenCore", "Loaded " .. #ScriptDatabase .. " scripts!", 3, "🎉")
+SafeNotify("Script Hub", "Loaded " .. #ScriptDatabase .. " scripts!", 3)
 
-print("[RenCore] Initialized successfully")
-print("[RenCore] Total Scripts: " .. #ScriptDatabase)
-print("[RenCore] Total Favorites: " .. #Favorites)
-print("[RenCore] Toggle Key: " .. Library.ToggleKey.Name)
+print("[Script Hub] Initialized successfully")
+print("[Script Hub] Total Scripts: " .. #ScriptDatabase)
+print("[Script Hub] Total Favorites: " .. #Favorites)
+
+
+
+
+-------------------------------------------------------------------------------
+--// AUTO-CLOSE ON SCRIPT EXECUTION
+-------------------------------------------------------------------------------
+local OriginalExecuteScript = ExecuteScript
+
+ExecuteScript = function(scriptData)
+    OriginalExecuteScript(scriptData)
+    
+    -- Wait a bit to ensure script loads
+    task.wait(1)
+    
+    -- Close and destroy the hub
+    if Library and Library.ScreenGui then
+        Library.ScreenGui:Destroy()
+    end
+    
+    print("[Script Hub] Closed after script execution")
+end
+
+return true
