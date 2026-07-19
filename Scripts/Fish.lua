@@ -31,11 +31,10 @@ local Runtime = {
 env[SINGLETON_KEY] = Runtime
 
 local State = {
-    autoFish = false,
     autoEquip = true,
-    autoCast = true,
-    autoShake = true,
-    autoReel = true,
+    autoCast = false,
+    autoShake = false,
+    autoReel = false,
     autoSell = false,
     fastCast = false,
     perfectCast = true,
@@ -277,6 +276,25 @@ local function hasBobber(rod)
     return false
 end
 
+local function castPowerBar()
+    local currentCharacter = character()
+    if not currentCharacter then
+        return nil
+    end
+
+    for _, item in ipairs(currentCharacter:GetDescendants()) do
+        if item:IsA("GuiObject") and normalize(item.Name) == "bar" then
+            local parent = item.Parent
+            local grandparent = parent and parent.Parent
+            local parentName = parent and normalize(parent.Name) or ""
+            local grandparentName = grandparent and normalize(grandparent.Name) or ""
+            if parentName == "powerbar" or grandparentName == "powerbar" then
+                return item
+            end
+        end
+    end
+end
+
 local casting = false
 local castSequence = 0
 
@@ -287,7 +305,9 @@ local function cancelCast()
 end
 
 -- Both modes use the updated script's held-primary-input method.
--- Fast Cast releases immediately. Perfect Cast holds that same input for 3 seconds.
+-- Fast Cast keeps its old behavior: release when the visible charge bar appears,
+-- with the old short fallback when the bar cannot be found.
+-- Perfect Cast holds that same input for exactly 3 seconds.
 local function cast()
     if casting then
         return false, "cast already in progress"
@@ -308,20 +328,27 @@ local function cast()
         return false, "primary input unavailable"
     end
 
-    if mode == "Perfect Cast" then
+    if mode == "Fast Cast" then
+        local started = os.clock()
+        repeat
+            task.wait(0.01)
+        until castPowerBar()
+            or os.clock() - started >= 0.15
+            or token ~= castSequence
+            or not Runtime.alive
+            or not State.autoCast
+    else
         local releaseAt = os.clock() + 3
         repeat
             task.wait(math.min(0.05, math.max(0, releaseAt - os.clock())))
         until os.clock() >= releaseAt
             or token ~= castSequence
             or not Runtime.alive
-            or not State.autoFish
             or not State.autoCast
     end
 
     local cancelled = token ~= castSequence
         or not Runtime.alive
-        or not State.autoFish
         or not State.autoCast
 
     setPrimaryInput(false)
@@ -360,6 +387,21 @@ local function isHierarchyVisible(object)
     return current == playerGui
 end
 
+local function isShakeButton(button)
+    if not button or not button:IsA("GuiButton") or not isHierarchyVisible(button) then
+        return false
+    end
+
+    local current = button
+    while current and current ~= playerGui do
+        if string.find(normalize(current.Name), "shake", 1, true) then
+            return true
+        end
+        current = current.Parent
+    end
+    return false
+end
+
 local function shakeButton(now)
     if cachedShakeButton and cachedShakeButton.Parent and isHierarchyVisible(cachedShakeButton) then
         return cachedShakeButton
@@ -372,27 +414,8 @@ local function shakeButton(now)
     end
     nextShakeScan = now + 0.2
 
-    local shakeRoot
     for _, item in ipairs(playerGui:GetDescendants()) do
-        if (item:IsA("GuiObject") or item:IsA("LayerCollector"))
-            and string.find(normalize(item.Name), "shake", 1, true)
-            and isVisible(item)
-        then
-            shakeRoot = item
-            break
-        end
-    end
-    if not shakeRoot then
-        return nil
-    end
-
-    if shakeRoot:IsA("GuiButton") and shakeRoot.Visible then
-        cachedShakeButton = shakeRoot
-        return shakeRoot
-    end
-
-    for _, item in ipairs(shakeRoot:GetDescendants()) do
-        if item:IsA("GuiButton") and item.Visible then
+        if isShakeButton(item) then
             cachedShakeButton = item
             return item
         end
@@ -430,6 +453,20 @@ local function clickGuiButton(button)
         VirtualInputManager:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
     end)
 end
+
+connect(playerGui.DescendantAdded, function(descendant)
+    if Runtime.alive and State.autoShake and isShakeButton(descendant) then
+        cachedShakeButton = descendant
+        nextShakeScan = 0
+    end
+end)
+
+connect(playerGui.DescendantRemoving, function(descendant)
+    if descendant == cachedShakeButton then
+        cachedShakeButton = nil
+        nextShakeScan = 0
+    end
+end)
 
 -- BlackHub's reel is not an instant-finish call.  The reel LocalScript keeps
 -- the effective player-bar/hitbox width in Lua state, so changing GuiObject.Size
@@ -777,7 +814,7 @@ local function normalReel(reelGui)
 end
 
 connect(reelPlayerGui.ChildAdded, function(child)
-    if Runtime.alive and State.autoFish and State.autoReel then normalReel(child) end
+    if Runtime.alive and State.autoReel then normalReel(child) end
 end)
 
 local function sellAll()
@@ -796,86 +833,199 @@ local function sellAll()
     return callRemote(remote)
 end
 
--- The FPS booster is retained from the outdated RenLib script without gameplay edits.
-local fpsBoosterApplied = false
+-- Reversible aggressive FPS booster. Every changed property is captured once
+-- and restored when the toggle is disabled.
+local fpsBoosterEnabled = false
+local fpsBoostGeneration = 0
+local fpsChanges = {}
+local fpsSlots = {}
+local fpsDescendantConnection
+local previousFpsCap
 
-local function reduceVisualCost(instance)
-    pcall(function()
-        if instance:IsA("BasePart") then
-            instance.CastShadow = false
-        elseif instance:IsA("ParticleEmitter")
-            or instance:IsA("Trail")
-            or instance:IsA("Beam")
-            or instance:IsA("Smoke")
-            or instance:IsA("Fire")
-            or instance:IsA("Sparkles")
-        then
-            instance.Enabled = false
-        end
-    end)
-end
-
-local function applyFpsBooster()
-    if fpsBoosterApplied then
-        setStatus("FPS booster is already active")
+local function setBoostProperty(target, property, desired)
+    local slots = fpsSlots[target]
+    if not slots then
+        slots = {}
+        fpsSlots[target] = slots
+    end
+    if slots[property] then
+        pcall(function()
+            target[property] = desired
+        end)
         return
     end
 
-    fpsBoosterApplied = true
-    setStatus("Applying FPS booster...")
-
-    pcall(function()
-        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    local ok, original = pcall(function()
+        return target[property]
     end)
+    if not ok or original == desired then
+        return
+    end
+
+    local change = {
+        target = target,
+        property = property,
+        original = original,
+    }
+    slots[property] = change
+    fpsChanges[#fpsChanges + 1] = change
+    pcall(function()
+        target[property] = desired
+    end)
+end
+
+local function reduceVisualCost(instance)
+    if instance:IsA("BasePart") then
+        setBoostProperty(instance, "CastShadow", false)
+        setBoostProperty(instance, "Material", Enum.Material.SmoothPlastic)
+        setBoostProperty(instance, "Reflectance", 0)
+        if instance:IsA("MeshPart") then
+            setBoostProperty(instance, "RenderFidelity", Enum.RenderFidelity.Performance)
+            setBoostProperty(instance, "TextureID", "")
+        end
+    elseif instance:IsA("Decal") or instance:IsA("Texture") then
+        setBoostProperty(instance, "Transparency", 1)
+    elseif instance:IsA("ParticleEmitter")
+        or instance:IsA("Trail")
+        or instance:IsA("Beam")
+        or instance:IsA("Smoke")
+        or instance:IsA("Fire")
+        or instance:IsA("Sparkles")
+        or instance:IsA("PostEffect")
+        or instance:IsA("PointLight")
+        or instance:IsA("SpotLight")
+        or instance:IsA("SurfaceLight")
+        or instance:IsA("Highlight")
+    then
+        setBoostProperty(instance, "Enabled", false)
+    elseif instance:IsA("Atmosphere") then
+        setBoostProperty(instance, "Density", 0)
+        setBoostProperty(instance, "Haze", 0)
+        setBoostProperty(instance, "Glare", 0)
+    elseif instance:IsA("Clouds") then
+        setBoostProperty(instance, "Enabled", false)
+        setBoostProperty(instance, "Cover", 0)
+        setBoostProperty(instance, "Density", 0)
+    elseif instance:IsA("Sky") then
+        setBoostProperty(instance, "StarCount", 0)
+        setBoostProperty(instance, "CelestialBodiesShown", false)
+    elseif instance:IsA("Explosion") or instance:IsA("ForceField") then
+        setBoostProperty(instance, "Visible", false)
+    end
+end
+
+local function restoreFpsBooster()
+    if fpsDescendantConnection then
+        pcall(fpsDescendantConnection.Disconnect, fpsDescendantConnection)
+        fpsDescendantConnection = nil
+    end
+
+    for index = #fpsChanges, 1, -1 do
+        local change = fpsChanges[index]
+        pcall(function()
+            change.target[change.property] = change.original
+        end)
+    end
+    table.clear(fpsChanges)
+    table.clear(fpsSlots)
+
+    if previousFpsCap and type(setfpscap) == "function" then
+        pcall(setfpscap, previousFpsCap)
+    end
+    previousFpsCap = nil
+end
+
+local function setFpsBooster(value, silent)
+    value = value == true
+    if value == fpsBoosterEnabled then
+        return
+    end
+
+    fpsBoosterEnabled = value
+    fpsBoostGeneration += 1
+    local generation = fpsBoostGeneration
+
+    if not value then
+        restoreFpsBooster()
+        if not silent then
+            setStatus("FPS booster disabled and visuals restored")
+        end
+        return
+    end
+
+    setStatus("Applying aggressive FPS booster...")
+
+    local rendering = settings().Rendering
+    setBoostProperty(rendering, "QualityLevel", Enum.QualityLevel.Level01)
 
     local lighting = game:GetService("Lighting")
+    setBoostProperty(lighting, "GlobalShadows", false)
+    setBoostProperty(lighting, "EnvironmentDiffuseScale", 0)
+    setBoostProperty(lighting, "EnvironmentSpecularScale", 0)
     pcall(function()
-        lighting.GlobalShadows = false
-        lighting.EnvironmentDiffuseScale = 0
-        lighting.EnvironmentSpecularScale = 0
+        setBoostProperty(lighting, "Technology", Enum.Technology.Compatibility)
     end)
-
-    for _, effect in ipairs(lighting:GetChildren()) do
-        if effect:IsA("PostEffect") then
-            pcall(function()
-                effect.Enabled = false
-            end)
-        end
-    end
 
     local terrain = workspace:FindFirstChildOfClass("Terrain")
     if terrain then
-        pcall(function()
-            terrain.WaterWaveSize = 0
-            terrain.WaterWaveSpeed = 0
-            terrain.WaterReflectance = 0
-        end)
+        setBoostProperty(terrain, "Decoration", false)
+        setBoostProperty(terrain, "WaterWaveSize", 0)
+        setBoostProperty(terrain, "WaterWaveSpeed", 0)
+        setBoostProperty(terrain, "WaterReflectance", 0)
+        setBoostProperty(terrain, "WaterTransparency", 1)
+    end
+    setBoostProperty(workspace, "GlobalWind", Vector3.zero)
+
+    if type(getfpscap) == "function" and type(setfpscap) == "function" then
+        local ok, cap = pcall(getfpscap)
+        if ok and type(cap) == "number" then
+            previousFpsCap = cap
+            pcall(setfpscap, math.max(cap, 240))
+        end
     end
 
-    connect(workspace.DescendantAdded, reduceVisualCost)
+    fpsDescendantConnection = game.DescendantAdded:Connect(function(instance)
+        if fpsBoosterEnabled
+            and (instance:IsDescendantOf(workspace) or instance:IsDescendantOf(lighting))
+        then
+            reduceVisualCost(instance)
+        end
+    end)
 
     task.spawn(function()
         local descendants = workspace:GetDescendants()
+        for _, instance in ipairs(lighting:GetDescendants()) do
+            descendants[#descendants + 1] = instance
+        end
         for index, instance in ipairs(descendants) do
+            if not Runtime.alive
+                or not fpsBoosterEnabled
+                or generation ~= fpsBoostGeneration
+            then
+                return
+            end
             reduceVisualCost(instance)
-            if index % 400 == 0 then
+            if index % 300 == 0 then
                 task.wait()
             end
         end
         table.clear(descendants)
-        setStatus("FPS booster active")
+        if fpsBoosterEnabled and generation == fpsBoostGeneration then
+            setStatus("Aggressive FPS booster active")
+        end
     end)
 end
 
 local function setOption(key, value)
     State[key] = value == true
 
-    if (key == "autoFish" or key == "autoCast") and not State[key] then
+    if key == "autoCast" and not State.autoCast then
         cancelCast()
     end
-    if (key == "autoFish" or key == "autoReel")
-        and (not State.autoFish or not State.autoReel)
-    then
+    if key == "autoShake" and not State.autoShake then
+        cachedShakeButton = nil
+    end
+    if key == "autoReel" and not State.autoReel then
         restoreReelControl()
     end
 
@@ -1000,16 +1150,6 @@ local UtilitySection = FishingTab:CreateSection({
     Icon = RenLib.Icons.Terminal or RenLib.Icons.Info,
 })
 
-controls.AutoFish = AutomationSection:CreateToggle({
-    Name = "Master Auto Fish",
-    Flag = "RenHubFischAutoFish",
-    Default = false,
-    Tooltip = "Runs the enabled cast, shake, and reel stages.",
-    Callback = function(value)
-        setOption("autoFish", value)
-    end,
-})
-
 controls.AutoEquip = AutomationSection:CreateToggle({
     Name = "Auto Equip Rod",
     Flag = "RenHubFischAutoEquip",
@@ -1022,7 +1162,7 @@ controls.AutoEquip = AutomationSection:CreateToggle({
 controls.AutoCast = AutomationSection:CreateToggle({
     Name = "Auto Cast",
     Flag = "RenHubFischAutoCast",
-    Default = true,
+    Default = false,
     Callback = function(value)
         setOption("autoCast", value)
     end,
@@ -1031,7 +1171,7 @@ controls.AutoCast = AutomationSection:CreateToggle({
 controls.AutoShake = AutomationSection:CreateToggle({
     Name = "Auto Shake",
     Flag = "RenHubFischAutoShake",
-    Default = true,
+    Default = false,
     Callback = function(value)
         setOption("autoShake", value)
     end,
@@ -1040,7 +1180,7 @@ controls.AutoShake = AutomationSection:CreateToggle({
 controls.AutoReel = AutomationSection:CreateToggle({
     Name = "Auto Reel",
     Flag = "RenHubFischAutoReel",
-    Default = true,
+    Default = false,
     Tooltip = "Patches the live internal reel width and lets the normal game reel finish.",
     Callback = function(value)
         setOption("autoReel", value)
@@ -1051,7 +1191,7 @@ controls.FastCast = CastSection:CreateToggle({
     Name = "Fast Cast",
     Flag = "RenHubFischFastCast",
     Default = false,
-    Tooltip = "Releases the updated held-input cast immediately.",
+    Tooltip = "Uses the old Fast Cast behavior: release when the visible charge bar appears, with a short fallback.",
     Callback = onFastCast,
 })
 
@@ -1066,30 +1206,6 @@ controls.PerfectCast = CastSection:CreateToggle({
 CastSection:CreateParagraph({
     Title = "Cast mode rule",
     Content = "Fast Cast and Perfect Cast are mutually exclusive. Turning either mode off automatically enables the other, so one mode is always active.",
-})
-
-CastSection:CreateSlider({
-    Name = "Recast Delay",
-    Flag = "RenHubFischCastInterval",
-    Min = 0.5,
-    Max = 15,
-    Step = 0.5,
-    Default = State.castInterval,
-    Callback = function(value)
-        State.castInterval = value
-    end,
-})
-
-CastSection:CreateSlider({
-    Name = "Shake Interval",
-    Flag = "RenHubFischShakeInterval",
-    Min = 0.08,
-    Max = 0.5,
-    Step = 0.01,
-    Default = State.shakeInterval,
-    Callback = function(value)
-        State.shakeInterval = value
-    end,
 })
 
 controls.AutoSell = SellingSection:CreateToggle({
@@ -1129,15 +1245,17 @@ SellingSection:CreateButton({
     end,
 })
 
-UtilitySection:CreateButton({
-    Name = "Apply Safe FPS Booster",
-    Tooltip = "Keeps the existing one-way FPS boost without changing collisions or fishing controls.",
-    Callback = applyFpsBooster,
+controls.FpsBooster = UtilitySection:CreateToggle({
+    Name = "Aggressive FPS Booster",
+    Flag = "RenHubFischFpsBooster",
+    Default = false,
+    Tooltip = "Reversibly reduces materials, textures, shadows, lights, effects, atmosphere, water, and render quality.",
+    Callback = setFpsBooster,
 })
 
 UtilitySection:CreateParagraph({
-    Title = "FPS booster safety",
-    Content = "Lowers render quality, shadows, post effects, particles, trails, beams, and water effects. It does not delete parts, alter collisions, hide the UI, or change fishing methods.",
+    Title = "FPS booster",
+    Content = "Aggressively lowers visual cost without deleting gameplay parts or changing collisions. Turning it off restores every captured property. Actual FPS gain depends on the device and current scene.",
 })
 
 statusControl = UtilitySection:CreateParagraph({
@@ -1147,7 +1265,7 @@ statusControl = UtilitySection:CreateParagraph({
 
 UtilitySection:CreateParagraph({
     Title = "Optimizations",
-    Content = "Cached rod classification, cached shake targets, throttled shake discovery, bounded reel-controller scans, cached remotes, deduplicated status updates, and lifecycle-managed connections.",
+    Content = "Independent fishing toggles, event-aware shake discovery, cached rod classification, bounded reel-controller scans, cached remotes, deduplicated status updates, and lifecycle-managed cleanup.",
 })
 
 -- Enforce the requested default after both controls exist.
@@ -1161,6 +1279,9 @@ function Runtime.Unload(fromLibrary)
     Runtime.alive = false
     cancelCast()
     restoreReelControl()
+    if fpsBoosterEnabled then
+        setFpsBooster(false, true)
+    end
 
     for _, connection in ipairs(Runtime.connections) do
         pcall(connection.Disconnect, connection)
@@ -1180,7 +1301,7 @@ end
 RenLib:RegisterAddon("RenHubFischRuntime", {
     AutoStart = true,
     Start = function()
-        setStatus("Ready - enable Master Auto Fish")
+        setStatus("Ready - each automation toggle works independently")
     end,
     Stop = function() end,
     Unload = function()
@@ -1197,11 +1318,14 @@ task.spawn(function()
     while Runtime.alive do
         local now = os.clock()
 
-        if State.autoFish then
+        if State.autoCast or State.autoShake or State.autoReel then
             local ok, result = pcall(function()
-                local rod = equippedRod()
-                if not rod and State.autoEquip then
-                    rod = equipRod()
+                local rod
+                if State.autoCast then
+                    rod = equippedRod()
+                    if not rod and State.autoEquip then
+                        rod = equipRod()
+                    end
                 end
 
                 local reeling = State.autoReel and normalReel() or false
@@ -1210,18 +1334,18 @@ task.spawn(function()
                 if reeling then
                     setStatus(
                         reelPatch.applied > 0
-                            and "Auto Fish: internal max bar active"
-                            or "Auto Fish: finding reel controller"
+                            and "Auto Reel: internal max bar active"
+                            or "Auto Reel: finding controller"
                     )
                 elseif button and now - lastShake >= State.shakeInterval then
                     lastShake = now
                     clickGuiButton(button)
-                    setStatus("Auto Fish: shaking")
+                    setStatus("Auto Shake: activated")
                 elseif State.autoCast and rod and now >= nextCast and not hasBobber(rod) then
                     local castOk, castMode = cast()
                     nextCast = os.clock() + State.castInterval
                     if castOk then
-                        setStatus("Auto Fish: " .. castMode)
+                        setStatus("Auto Cast: " .. castMode)
                     elseif castMode ~= "cast cancelled" then
                         error(castMode)
                     end
@@ -1231,10 +1355,10 @@ task.spawn(function()
             if not ok then
                 local message = tostring(result)
                 if message ~= lastError then
-                    log("auto fish: " .. message)
+                    log("fishing automation: " .. message)
                     lastError = message
                 end
-                setStatus("Auto Fish waiting: " .. message)
+                setStatus("Automation waiting: " .. message)
             else
                 lastError = ""
             end
@@ -1255,4 +1379,4 @@ task.spawn(function()
 end)
 
 log("started version " .. Runtime.version)
-setStatus("Ready - enable Master Auto Fish")
+setStatus("Ready - each automation toggle works independently")
