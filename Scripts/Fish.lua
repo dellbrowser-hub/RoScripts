@@ -36,8 +36,7 @@ local State = {
     autoShake = false,
     autoReel = false,
     autoSell = false,
-    fastCast = false,
-    perfectCast = true,
+    castPower = 100,
     castInterval = 2,
     shakeInterval = 0.12,
     sellInterval = 300,
@@ -47,7 +46,6 @@ local statusControl
 local lastStatus
 local RenLib
 local controls = {}
-local syncingCastMode = false
 local unloadingLibrary = false
 
 local function connect(signal, callback)
@@ -295,69 +293,40 @@ local function castPowerBar()
     end
 end
 
-local casting = false
-local castSequence = 0
-
-local function cancelCast()
-    castSequence += 1
-    casting = false
-    setPrimaryInput(false)
-end
-
--- Both modes use the updated script's held-primary-input method.
--- Fast Cast keeps its old behavior: release when the visible charge bar appears,
--- with the old short fallback when the bar cannot be found.
--- Perfect Cast holds that same input for exactly 3 seconds.
+-- Auto Cast copied from Fisch (1).lua. It holds normal primary input, follows
+-- the live power bar to the configured target, and uses the original fallback.
 local function cast()
-    if casting then
-        return false, "cast already in progress"
-    end
-
     local rod = equippedRod() or (State.autoEquip and equipRod())
     if not rod then
         return false, "no rod found"
     end
 
-    casting = true
-    castSequence += 1
-    local token = castSequence
-    local mode = State.fastCast and "Fast Cast" or "Perfect Cast"
-
     if not setPrimaryInput(true) then
-        casting = false
         return false, "primary input unavailable"
     end
 
-    if mode == "Fast Cast" then
-        local started = os.clock()
-        repeat
-            task.wait(0.01)
-        until castPowerBar()
-            or os.clock() - started >= 0.15
-            or token ~= castSequence
-            or not Runtime.alive
-            or not State.autoCast
-    else
-        local releaseAt = os.clock() + 3
-        repeat
-            task.wait(math.min(0.05, math.max(0, releaseAt - os.clock())))
-        until os.clock() >= releaseAt
-            or token ~= castSequence
-            or not Runtime.alive
-            or not State.autoCast
-    end
+    local started = os.clock()
+    local targetPower = math.clamp(State.castPower / 100, 0.01, 1)
+    local fallbackHold = 0.25 + (1.25 * targetPower)
+    local sawPowerBar = false
 
-    local cancelled = token ~= castSequence
+    repeat
+        task.wait(0.025)
+        local bar = castPowerBar()
+        if bar then
+            sawPowerBar = true
+            if bar.Size.X.Scale >= targetPower - 0.01 then
+                break
+            end
+        elseif not sawPowerBar and os.clock() - started >= fallbackHold then
+            break
+        end
+    until os.clock() - started >= 2.25
         or not Runtime.alive
         or not State.autoCast
 
     setPrimaryInput(false)
-    casting = false
-
-    if cancelled then
-        return false, "cast cancelled"
-    end
-    return true, mode
+    return true
 end
 
 local cachedShakeButton
@@ -1020,7 +989,7 @@ local function setOption(key, value)
     State[key] = value == true
 
     if key == "autoCast" and not State.autoCast then
-        cancelCast()
+        setPrimaryInput(false)
     end
     if key == "autoShake" and not State.autoShake then
         cachedShakeButton = nil
@@ -1030,61 +999,6 @@ local function setOption(key, value)
     end
 
     setStatus(key .. ": " .. (State[key] and "ON" or "OFF"))
-end
-
-local function syncCastControls()
-    if syncingCastMode then
-        return
-    end
-    syncingCastMode = true
-
-    local fastControl = controls.FastCast
-    local perfectControl = controls.PerfectCast
-    if fastControl and fastControl.Get and fastControl.Set
-        and fastControl:Get() ~= State.fastCast
-    then
-        fastControl:Set(State.fastCast)
-    end
-    if perfectControl and perfectControl.Get and perfectControl.Set
-        and perfectControl:Get() ~= State.perfectCast
-    then
-        perfectControl:Set(State.perfectCast)
-    end
-
-    syncingCastMode = false
-end
-
-local function selectCastMode(mode)
-    State.fastCast = mode == "Fast Cast"
-    State.perfectCast = not State.fastCast
-    syncCastControls()
-    setStatus("Cast mode: " .. mode)
-end
-
-local function onFastCast(value)
-    if syncingCastMode then
-        return
-    end
-    if value then
-        selectCastMode("Fast Cast")
-    elseif State.fastCast then
-        selectCastMode("Perfect Cast")
-    else
-        syncCastControls()
-    end
-end
-
-local function onPerfectCast(value)
-    if syncingCastMode then
-        return
-    end
-    if value then
-        selectCastMode("Perfect Cast")
-    elseif State.perfectCast then
-        selectCastMode("Fast Cast")
-    else
-        syncCastControls()
-    end
 end
 
 local function loadRenLib()
@@ -1130,12 +1044,6 @@ local AutomationSection = FishingTab:CreateSection({
     Name = "Automation",
     Side = "Left",
     Icon = RenLib.Icons.Play,
-})
-
-local CastSection = FishingTab:CreateSection({
-    Name = "Casting",
-    Side = "Right",
-    Icon = RenLib.Icons.Star or RenLib.Icons.Play,
 })
 
 local SellingSection = FishingTab:CreateSection({
@@ -1185,27 +1093,6 @@ controls.AutoReel = AutomationSection:CreateToggle({
     Callback = function(value)
         setOption("autoReel", value)
     end,
-})
-
-controls.FastCast = CastSection:CreateToggle({
-    Name = "Fast Cast",
-    Flag = "RenHubFischFastCast",
-    Default = false,
-    Tooltip = "Uses the old Fast Cast behavior: release when the visible charge bar appears, with a short fallback.",
-    Callback = onFastCast,
-})
-
-controls.PerfectCast = CastSection:CreateToggle({
-    Name = "Perfect Cast",
-    Flag = "RenHubFischPerfectCast",
-    Default = true,
-    Tooltip = "Holds the same cast input for exactly 3 seconds, then releases.",
-    Callback = onPerfectCast,
-})
-
-CastSection:CreateParagraph({
-    Title = "Cast mode rule",
-    Content = "Fast Cast and Perfect Cast are mutually exclusive. Turning either mode off automatically enables the other, so one mode is always active.",
 })
 
 controls.AutoSell = SellingSection:CreateToggle({
@@ -1268,16 +1155,13 @@ UtilitySection:CreateParagraph({
     Content = "Independent fishing toggles, event-aware shake discovery, cached rod classification, bounded reel-controller scans, cached remotes, deduplicated status updates, and lifecycle-managed cleanup.",
 })
 
--- Enforce the requested default after both controls exist.
-selectCastMode("Perfect Cast")
-
 function Runtime.Unload(fromLibrary)
     if not Runtime.alive then
         return
     end
 
     Runtime.alive = false
-    cancelCast()
+    setPrimaryInput(false)
     restoreReelControl()
     if fpsBoosterEnabled then
         setFpsBooster(false, true)
@@ -1342,12 +1226,12 @@ task.spawn(function()
                     clickGuiButton(button)
                     setStatus("Auto Shake: activated")
                 elseif State.autoCast and rod and now >= nextCast and not hasBobber(rod) then
-                    local castOk, castMode = cast()
-                    nextCast = os.clock() + State.castInterval
+                    local castOk, castError = cast()
+                    nextCast = now + State.castInterval
                     if castOk then
-                        setStatus("Auto Cast: " .. castMode)
-                    elseif castMode ~= "cast cancelled" then
-                        error(castMode)
+                        setStatus("Auto Cast: cast sent")
+                    else
+                        error(castError)
                     end
                 end
             end)
