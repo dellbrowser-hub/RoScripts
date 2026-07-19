@@ -4,10 +4,10 @@
 -- Uses only confirmed client behavior:
 --   * Any Tool with events/castAsync + values/state is treated as a rod.
 --   * Casting is performed with a real held/released input.
---   * Shake uses the live PlayerGui.shakeui.safezone.button.
---   * Reeling follows PlayerGui.reel.bar.fish with reel.bar.playerbar.
+--   * Shake activates the live PlayerGui shake button on a bounded interval.
+--   * Reel patches the live internal max-bar value, then lets the game finish.
 --
--- No controller require, no getgc scan, no game-wide scan, no pixel/framebuffer API.
+-- No controller require, no repeated game-wide scan, no pixel/framebuffer API.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -51,6 +51,7 @@ local Settings = {
 	AutoCast = false,
 	AutoShake = false,
 	AutoReel = false,
+	AutoSell = false,
 	CastMode = "Perfect Cast", -- "Perfect Cast" or "Fast Cast"
 }
 
@@ -413,6 +414,8 @@ local function tryEquip()
 end
 
 -- Cast charge-bar model ------------------------------------------------------
+
+-- Original predictive cast-vision controller.
 
 -- GUI-only perfect-cast controller.
 --
@@ -1697,6 +1700,149 @@ local function clearCastSession()
 
 	castSession = nil
 end
+
+-- End original predictive cast-vision controller.
+
+-- Optimized Fisch (1).lua cast controller -----------------------------------
+
+--[==[ Reverted compatibility cast retained as inactive source history.
+
+local function isCastPowerBar(object)
+	if not object or not object:IsA("GuiObject") or string.lower(object.Name) ~= "bar" then
+		return false
+	end
+	local parent = object.Parent
+	local grandparent = parent and parent.Parent
+	local parentName = parent and string.lower(parent.Name):gsub("[^%w]", "") or ""
+	local grandparentName = grandparent and string.lower(grandparent.Name):gsub("[^%w]", "") or ""
+	return parentName == "powerbar" or grandparentName == "powerbar"
+end
+
+local function findCastPowerBar(currentCharacter)
+	if not currentCharacter then return nil end
+	for _, descendant in ipairs(currentCharacter:GetDescendants()) do
+		if isCastPowerBar(descendant) then return descendant end
+	end
+	return nil
+end
+
+local function castBarRatio(bar)
+	if not bar or not bar.Parent then return 0 end
+	local ratio = tonumber(bar.Size.X.Scale) or 0
+	local parent = bar.Parent
+	if parent:IsA("GuiObject") and parent.AbsoluteSize.X > 0 then
+		ratio = math.max(ratio, bar.AbsoluteSize.X / parent.AbsoluteSize.X)
+	end
+	return math.clamp(ratio, 0, 1)
+end
+
+local function disconnectLightCastSession(session)
+	if session and session.DiscoveryConnection then
+		pcall(function() session.DiscoveryConnection:Disconnect() end)
+		session.DiscoveryConnection = nil
+	end
+end
+
+local function releaseLightCast(session, status)
+	if not session or session.Released then return end
+	session.Released = true
+	disconnectLightCastSession(session)
+	Input.SetCastHeld(false)
+	if castSession == session then castSession = nil end
+	if status then setStatus(status) end
+end
+
+local function startCast()
+	if destroyed or not Settings.AutoCast or castSession then return end
+
+	local rod = activeRod
+	local currentCharacter = character()
+	if not rod or not currentCharacter or rod.Parent ~= currentCharacter then return end
+	local state = rodState(rod)
+	if state ~= State.Equipped or rodHasBobber(rod) then return end
+
+	castSequence += 1
+	local session = {
+		Id = castSequence,
+		Rod = rod,
+		Released = false,
+		PowerBar = findCastPowerBar(currentCharacter),
+		DiscoveryConnection = nil,
+	}
+	castSession = session
+
+	if not Input.SetCastHeld(true) then
+		castSession = nil
+		setStatus("Cast input unavailable")
+		return
+	end
+
+	session.DiscoveryConnection = currentCharacter.DescendantAdded:Connect(function(descendant)
+		if castSession == session and not session.PowerBar and isCastPowerBar(descendant) then
+			session.PowerBar = descendant
+		end
+	end)
+	setStatus(Settings.CastMode == "Fast Cast" and "Fast casting" or "Charging cast")
+
+	task.spawn(function()
+		local started = os.clock()
+		local sawPowerBar = session.PowerBar ~= nil
+		local fastCast = Settings.CastMode == "Fast Cast"
+
+		repeat
+			RunService.Heartbeat:Wait()
+			if castSession ~= session
+				or session.Released
+				or destroyed
+				or not Settings.AutoCast
+				or activeRod ~= rod
+			then
+				break
+			end
+
+			local elapsed = os.clock() - started
+			local bar = session.PowerBar
+			if bar and bar.Parent then
+				sawPowerBar = true
+				if fastCast or castBarRatio(bar) >= 0.99 then
+					releaseLightCast(session, fastCast and "Fast cast released" or "Full-power cast released")
+					return
+				end
+			elseif fastCast and elapsed >= 0.15 then
+				releaseLightCast(session, "Fast cast released")
+				return
+			elseif not sawPowerBar and elapsed >= 1.5 then
+				releaseLightCast(session, "Full-power cast released")
+				return
+			end
+
+			local currentState = rodState(rod)
+			if rodHasBobber(rod) or (currentState and currentState >= State.Searching) then
+				releaseLightCast(session, "Cast accepted")
+				return
+			end
+		until os.clock() - started >= 2.25
+
+		releaseLightCast(session, "Cast released")
+	end)
+end
+
+local function clearCastSession()
+	castSequence += 1
+	local session = castSession
+	if session then
+		disconnectLightCastSession(session)
+		session.Released = true
+	end
+	castSession = nil
+	Input.SetCastHeld(false)
+end
+
+]==]
+
+--[=[ Legacy shake/reel controllers retained as source history only.
+-- They are intentionally excluded from compilation; the optimized current
+-- implementations begin after this long comment.
 
 -- Shake ----------------------------------------------------------------------
 
@@ -3487,6 +3633,947 @@ local function existingReelGui()
 	return nil
 end
 
+]=]
+
+-- Optimized shake ------------------------------------------------------------
+
+local SHAKE_INTERVAL = 0.09
+local shakeLoopToken = 0
+local cachedShakeButton = nil
+
+local function compactName(value)
+	return string.lower(tostring(value)):gsub("[^%w]", "")
+end
+
+local function guiIsUsable(gui)
+	if not gui or not gui.Parent then
+		return false
+	end
+
+	local current = gui
+	while current and current ~= PlayerGui do
+		if current:IsA("GuiObject") and not current.Visible then
+			return false
+		elseif current:IsA("LayerCollector") and not current.Enabled then
+			return false
+		end
+		current = current.Parent
+	end
+
+	return current == PlayerGui
+end
+
+local function isShakeGuiCandidate(gui)
+	return gui ~= nil
+		and gui.Parent ~= nil
+		and string.find(compactName(gui.Name), "shake", 1, true) ~= nil
+end
+
+local function findShakeButton(root)
+	if not root or not root.Parent then
+		return nil
+	end
+
+	if root:IsA("GuiButton") then
+		return root
+	end
+
+	local safezone = root:FindFirstChild("safezone")
+	local direct = safezone and safezone:FindFirstChild("button")
+	if direct and direct:IsA("GuiButton") then
+		return direct
+	end
+
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("GuiButton") then
+			return descendant
+		end
+	end
+
+	return nil
+end
+
+local function clickShakeButton(button)
+	if not guiIsUsable(button) then
+		return false
+	end
+
+	local fireSignal = getGlobalFunction("firesignal")
+	if fireSignal then
+		local ok = pcall(function()
+			fireSignal(button.Activated)
+			fireSignal(button.MouseButton1Click)
+		end)
+		if ok then
+			setInputStatus("firesignal/Shake")
+			return true
+		end
+	end
+
+	if VirtualInputManager then
+		local selected = GuiService.SelectedObject
+		local ok = pcall(function()
+			GuiService.SelectedObject = button
+			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+			GuiService.SelectedObject = selected
+		end)
+		if ok then
+			setInputStatus("VirtualInputManager/Shake")
+			return true
+		end
+	end
+
+	local point = button.AbsolutePosition + button.AbsoluteSize * 0.5
+	local pressed = Input.Mouse(true, point)
+	local released = Input.Mouse(false, point)
+	return pressed and released
+end
+
+local function existingShakeGui()
+	for _, name in ipairs({ "shakeui", "shake", "ShakeUI", "Shake" }) do
+		local found = PlayerGui:FindFirstChild(name)
+		if found then
+			return found
+		end
+	end
+
+	for _, child in ipairs(PlayerGui:GetChildren()) do
+		if isShakeGuiCandidate(child) then
+			return child
+		end
+	end
+
+	return nil
+end
+
+local function attachShakeGui(root)
+	if destroyed or not root or not root.Parent then
+		return
+	end
+
+	shakeLoopToken += 1
+	local token = shakeLoopToken
+	disconnectBucket(shakeConnections)
+	activeShakeGui = root
+	cachedShakeButton = findShakeButton(root)
+
+	addConnection(root.DescendantAdded:Connect(function(descendant)
+		if descendant:IsA("GuiButton") then
+			cachedShakeButton = descendant
+		end
+	end), shakeConnections)
+
+	addConnection(root.AncestryChanged:Connect(function()
+		if not root:IsDescendantOf(PlayerGui) then
+			shakeLoopToken += 1
+			cachedShakeButton = nil
+			if activeShakeGui == root then
+				activeShakeGui = nil
+			end
+		end
+	end), shakeConnections)
+
+	if not Settings.AutoShake then
+		return
+	end
+
+	task.spawn(function()
+		local nextRescan = 0
+		while not destroyed
+			and Settings.AutoShake
+			and token == shakeLoopToken
+			and activeShakeGui == root
+			and root.Parent
+		do
+			local now = os.clock()
+			if not cachedShakeButton or not cachedShakeButton:IsDescendantOf(root) then
+				if now >= nextRescan then
+					cachedShakeButton = findShakeButton(root)
+					nextRescan = now + 0.25
+				end
+			end
+
+			if cachedShakeButton and guiIsUsable(cachedShakeButton) then
+				clickShakeButton(cachedShakeButton)
+				task.wait(SHAKE_INTERVAL)
+			else
+				task.wait(0.05)
+			end
+		end
+	end)
+end
+
+-- Optimized internal reel ----------------------------------------------------
+
+local debugLibrary = type(debug) == "table" and debug or nil
+local getUpvalues = debugLibrary and debugLibrary.getupvalues or getupvalues
+local setUpvalue = debugLibrary and debugLibrary.setupvalue or setupvalue
+local getConstants = debugLibrary and debugLibrary.getconstants or getconstants
+local getEnvironment = getfenv
+local getConnections = getGlobalFunction("getconnections")
+local getScriptEnvironment = getsenv
+local getGarbage = getgc
+
+local INTERNAL_REEL_SIZE_KEYS = {
+	control = true,
+	barsize = true,
+	barwidth = true,
+	playerbarsize = true,
+	playerbarwidth = true,
+	reelbarsize = true,
+	reelbarwidth = true,
+	controlbarsize = true,
+	controlbarwidth = true,
+	hitboxsize = true,
+	hitboxwidth = true,
+	reelhitboxsize = true,
+	reelhitboxwidth = true,
+}
+
+local reelPatch = {
+	reel = nil,
+	changes = {},
+	tableSlots = setmetatable({}, { __mode = "k" }),
+	functionSlots = setmetatable({}, { __mode = "k" }),
+	applied = 0,
+	attempts = 0,
+	fallbackUsed = false,
+}
+local reelStartToken = 0
+
+local function clearReelPatch()
+	reelPatch.reel = nil
+	table.clear(reelPatch.changes)
+	reelPatch.tableSlots = setmetatable({}, { __mode = "k" })
+	reelPatch.functionSlots = setmetatable({}, { __mode = "k" })
+	reelPatch.applied = 0
+	reelPatch.attempts = 0
+end
+
+local function restoreReelControl()
+	for index = #reelPatch.changes, 1, -1 do
+		local change = reelPatch.changes[index]
+		if change.kind == "table" then
+			pcall(function()
+				change.target[change.key] = change.original
+			end)
+		elseif change.kind == "upvalue" and type(setUpvalue) == "function" then
+			pcall(setUpvalue, change.target, change.key, change.original)
+		end
+	end
+	clearReelPatch()
+end
+
+local function rememberReelTableValue(target, key, desired)
+	local slots = reelPatch.tableSlots[target]
+	if not slots then
+		slots = {}
+		reelPatch.tableSlots[target] = slots
+	end
+
+	local change = slots[key]
+	if not change then
+		change = {
+			kind = "table",
+			target = target,
+			key = key,
+			original = target[key],
+			desired = desired,
+		}
+		slots[key] = change
+		table.insert(reelPatch.changes, change)
+		reelPatch.applied += 1
+	else
+		change.desired = desired
+	end
+
+	pcall(function()
+		target[key] = desired
+	end)
+end
+
+local function rememberReelUpvalue(target, key, original, desired)
+	if type(setUpvalue) ~= "function" or type(key) ~= "number" then
+		return
+	end
+
+	local slots = reelPatch.functionSlots[target]
+	if not slots then
+		slots = {}
+		reelPatch.functionSlots[target] = slots
+	end
+
+	local change = slots[key]
+	if not change then
+		change = {
+			kind = "upvalue",
+			target = target,
+			key = key,
+			original = original,
+			desired = desired,
+		}
+		slots[key] = change
+		table.insert(reelPatch.changes, change)
+		reelPatch.applied += 1
+	else
+		change.desired = desired
+	end
+
+	pcall(setUpvalue, target, key, desired)
+end
+
+local function enforceReelValues()
+	for _, change in ipairs(reelPatch.changes) do
+		if change.kind == "table" then
+			pcall(function()
+				if change.target[change.key] ~= change.desired then
+					change.target[change.key] = change.desired
+				end
+			end)
+		elseif change.kind == "upvalue" and type(setUpvalue) == "function" then
+			pcall(setUpvalue, change.target, change.key, change.desired)
+		end
+	end
+end
+
+local function valueContainsReelTarget(value, targets, depth, seen)
+	if targets[value] then
+		return true
+	end
+	if depth <= 0 or type(value) ~= "table" then
+		return false
+	end
+
+	seen = seen or {}
+	if seen[value] then
+		return false
+	end
+	seen[value] = true
+
+	local inspected = 0
+	for key, child in pairs(value) do
+		inspected += 1
+		if inspected > 80 then
+			break
+		end
+		if targets[key] or targets[child]
+			or valueContainsReelTarget(child, targets, depth - 1, seen)
+		then
+			return true
+		end
+	end
+	return false
+end
+
+local function matchingReelWidth(value, widthScale, widthRatio)
+	if type(value) ~= "number" or value <= 0 or value >= 0.99 then
+		return false
+	end
+	local tolerance = math.max(0.002, math.abs(widthRatio) * 0.025)
+	return math.abs(value - widthScale) <= tolerance
+		or math.abs(value - widthRatio) <= tolerance
+end
+
+local function maxReelValue(value, metrics)
+	local kind = typeof(value)
+	if kind == "number" and value >= 0 and value < 1.01 then
+		return 1
+	elseif kind == "UDim" then
+		return UDim.new(1, 0)
+	elseif kind == "UDim2" then
+		return UDim2.new(1, 0, value.Y.Scale, value.Y.Offset)
+	elseif kind == "Vector2" and metrics.barWidth > 0 then
+		return Vector2.new(metrics.barWidth, value.Y)
+	end
+	return nil
+end
+
+local function patchReelTable(target, metrics, depth, seen)
+	if type(target) ~= "table" or depth < 0 then
+		return
+	end
+	seen = seen or {}
+	if seen[target] then
+		return
+	end
+	seen[target] = true
+
+	local inspected = 0
+	for key, value in pairs(target) do
+		inspected += 1
+		if inspected > 120 then
+			break
+		end
+
+		if type(key) == "string" and INTERNAL_REEL_SIZE_KEYS[compactName(key)] then
+			local desired = maxReelValue(value, metrics)
+			if desired ~= nil and desired ~= value then
+				rememberReelTableValue(target, key, desired)
+			end
+		elseif matchingReelWidth(value, metrics.widthScale, metrics.widthRatio) then
+			rememberReelTableValue(target, key, 1)
+		elseif typeof(value) == "UDim" and value == metrics.playerSize.X then
+			rememberReelTableValue(target, key, UDim.new(1, 0))
+		elseif typeof(value) == "UDim2" and value == metrics.playerSize then
+			rememberReelTableValue(
+				target,
+				key,
+				UDim2.new(1, 0, value.Y.Scale, value.Y.Offset)
+			)
+		end
+
+		if type(value) == "table" and depth > 0 then
+			patchReelTable(value, metrics, depth - 1, seen)
+		end
+	end
+end
+
+local function functionMentionsReel(callback)
+	if type(getConstants) ~= "function" then
+		return false
+	end
+	local ok, constants = pcall(getConstants, callback)
+	if not ok or type(constants) ~= "table" then
+		return false
+	end
+	for _, constant in pairs(constants) do
+		if type(constant) == "string" then
+			local name = compactName(constant)
+			if name == "playerbar" or name == "reel" or name == "reelbar" then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function functionBelongsToReel(callback, reel)
+	if type(getEnvironment) ~= "function" then
+		return false
+	end
+	local ok, environment = pcall(getEnvironment, callback)
+	local owner = ok and type(environment) == "table" and rawget(environment, "script") or nil
+	return typeof(owner) == "Instance"
+		and owner:IsA("LuaSourceContainer")
+		and (owner:IsDescendantOf(reel)
+			or string.find(compactName(owner.Name), "reel", 1, true) ~= nil)
+end
+
+local function patchReelFunction(callback, reel, bar, playerBar, metrics, probeTargets)
+	if type(callback) ~= "function" or type(getUpvalues) ~= "function" then
+		return
+	end
+
+	local relevant = functionMentionsReel(callback) or functionBelongsToReel(callback, reel)
+	local ok, values = pcall(getUpvalues, callback)
+	if not ok or type(values) ~= "table" then
+		return
+	end
+
+	if not relevant and probeTargets then
+		local targets = { [reel] = true, [bar] = true, [playerBar] = true }
+		for _, value in pairs(values) do
+			if valueContainsReelTarget(value, targets, 2) then
+				relevant = true
+				break
+			end
+		end
+	end
+	if not relevant then
+		return
+	end
+
+	for key, value in pairs(values) do
+		if type(value) == "table" then
+			patchReelTable(value, metrics, 2)
+		elseif type(key) == "number" then
+			local kind = typeof(value)
+			if matchingReelWidth(value, metrics.widthScale, metrics.widthRatio) then
+				rememberReelUpvalue(callback, key, value, 1)
+			elseif kind == "UDim" and value == metrics.playerSize.X then
+				rememberReelUpvalue(callback, key, value, UDim.new(1, 0))
+			elseif kind == "UDim2" and value == metrics.playerSize then
+				rememberReelUpvalue(
+					callback,
+					key,
+					value,
+					UDim2.new(1, 0, value.Y.Scale, value.Y.Offset)
+				)
+			elseif kind == "Vector2"
+				and metrics.playerWidth > 0
+				and math.abs(value.X - metrics.playerWidth) <= 2
+			then
+				rememberReelUpvalue(
+					callback,
+					key,
+					value,
+					Vector2.new(metrics.barWidth, value.Y)
+				)
+			end
+		end
+	end
+end
+
+local function addReelCandidate(candidates, callback, probeTargets)
+	if type(callback) == "function" then
+		candidates[callback] = candidates[callback] == true or probeTargets == true
+	end
+end
+
+local function collectReelSignalCallbacks(candidates, signal)
+	if type(getConnections) ~= "function" or not signal then
+		return
+	end
+	local ok, signalConnections = pcall(getConnections, signal)
+	if not ok or type(signalConnections) ~= "table" then
+		return
+	end
+	for _, connection in ipairs(signalConnections) do
+		local callback
+		pcall(function()
+			callback = connection.Function or connection.Callback
+		end)
+		addReelCandidate(candidates, callback, true)
+	end
+end
+
+local function patchInternalReelController(reel, bar, playerBar)
+	if reelPatch.reel ~= reel then
+		restoreReelControl()
+		reelPatch.reel = reel
+	end
+
+	if reelPatch.applied > 0 then
+		enforceReelValues()
+		return true
+	end
+	reelPatch.attempts += 1
+
+	local barWidth = bar.AbsoluteSize.X
+	local playerWidth = playerBar.AbsoluteSize.X
+	local widthScale = playerBar.Size.X.Scale
+	local metrics = {
+		barWidth = barWidth,
+		playerWidth = playerWidth,
+		widthScale = widthScale,
+		widthRatio = barWidth > 0 and playerWidth / barWidth or widthScale,
+		playerSize = playerBar.Size,
+	}
+	local candidates = {}
+
+	collectReelSignalCallbacks(candidates, RunService.RenderStepped)
+	collectReelSignalCallbacks(candidates, RunService.Heartbeat)
+	pcall(function()
+		collectReelSignalCallbacks(candidates, RunService.PreRender)
+	end)
+
+	if type(getScriptEnvironment) == "function" then
+		for _, owner in ipairs(reel:GetDescendants()) do
+			if owner:IsA("LocalScript") then
+				local ok, environment = pcall(getScriptEnvironment, owner)
+				if ok and type(environment) == "table" then
+					for _, value in pairs(environment) do
+						addReelCandidate(candidates, value, true)
+					end
+				end
+			end
+		end
+	end
+
+	for callback, probeTargets in pairs(candidates) do
+		patchReelFunction(callback, reel, bar, playerBar, metrics, probeTargets)
+	end
+
+	-- One session-wide fallback preserves compatibility with controller builds
+	-- whose callback is not connected to a standard RunService signal.
+	if reelPatch.applied == 0
+		and reelPatch.attempts >= 3
+		and not reelPatch.fallbackUsed
+		and type(getGarbage) == "function"
+	then
+		reelPatch.fallbackUsed = true
+		local ok, objects = pcall(getGarbage, true)
+		if ok and type(objects) == "table" then
+			local targets = { [reel] = true, [bar] = true, [playerBar] = true }
+			for index = 1, math.min(#objects, 6000) do
+				local object = objects[index]
+				if type(object) == "function" then
+					patchReelFunction(object, reel, bar, playerBar, metrics, false)
+				elseif type(object) == "table"
+					and valueContainsReelTarget(object, targets, 2)
+				then
+					patchReelTable(object, metrics, 2)
+				end
+			end
+		end
+	end
+
+	return reelPatch.applied > 0
+end
+
+local function existingReelGui()
+	local direct = PlayerGui:FindFirstChild("reel") or PlayerGui:FindFirstChild("Reel")
+	if direct and direct:IsA("LayerCollector") then
+		return direct
+	end
+	for _, child in ipairs(PlayerGui:GetChildren()) do
+		if child:IsA("LayerCollector") and compactName(child.Name) == "reel" then
+			return child
+		end
+	end
+	return nil
+end
+
+local function reelParts(reel)
+	local bar = reel and (reel:FindFirstChild("bar") or reel:FindFirstChild("bar", true))
+	local playerBar = bar and (bar:FindFirstChild("playerbar") or bar:FindFirstChild("playerbar", true))
+	if bar and playerBar and playerBar:IsA("GuiObject") then
+		return bar, playerBar
+	end
+	return nil, nil
+end
+
+--[==[ Reverted low-UNC reel compatibility layer retained as inactive history.
+local standardReelPatch = {
+	playerBar = nil,
+	originalSize = nil,
+	values = {},
+}
+
+local function restoreStandardReelMax()
+	if standardReelPatch.playerBar and standardReelPatch.originalSize then
+		pcall(function()
+			standardReelPatch.playerBar.Size = standardReelPatch.originalSize
+		end)
+	end
+	for index = #standardReelPatch.values, 1, -1 do
+		local change = standardReelPatch.values[index]
+		pcall(function() change.target.Value = change.original end)
+	end
+	standardReelPatch.playerBar = nil
+	standardReelPatch.originalSize = nil
+	table.clear(standardReelPatch.values)
+end
+
+local function prepareStandardReelMax(reel, playerBar)
+	restoreStandardReelMax()
+	standardReelPatch.playerBar = playerBar
+	standardReelPatch.originalSize = playerBar.Size
+	local playerBarParent = playerBar.Parent
+	local parentWidth = playerBarParent
+		and playerBarParent:IsA("GuiObject")
+		and playerBarParent.AbsoluteSize.X
+		or playerBar.AbsoluteSize.X
+
+	for _, descendant in ipairs(reel:GetDescendants()) do
+		if descendant:IsA("ValueBase") and INTERNAL_REEL_SIZE_KEYS[compactName(descendant.Name)] then
+			local value = descendant.Value
+			local desired
+			local kind = typeof(value)
+			if kind == "number" and value >= 0 and value <= 1 then
+				desired = 1
+			elseif kind == "UDim" then
+				desired = UDim.new(1, 0)
+			elseif kind == "UDim2" then
+				desired = UDim2.new(1, 0, value.Y.Scale, value.Y.Offset)
+			elseif kind == "Vector2" then
+				desired = Vector2.new(math.max(value.X, parentWidth), value.Y)
+			end
+			if desired ~= nil and desired ~= value then
+				table.insert(standardReelPatch.values, {
+					target = descendant,
+					original = value,
+					desired = desired,
+				})
+			end
+		end
+	end
+end
+
+local function enforceStandardReelMax(playerBar)
+	if not playerBar or not playerBar.Parent then return false end
+	pcall(function()
+		local size = playerBar.Size
+		local desired = UDim2.new(1, 0, size.Y.Scale, size.Y.Offset)
+		if size ~= desired then playerBar.Size = desired end
+	end)
+	for _, change in ipairs(standardReelPatch.values) do
+		pcall(function()
+			if change.target.Value ~= change.desired then
+				change.target.Value = change.desired
+			end
+		end)
+	end
+	return true
+end
+]==]
+
+local function stopReel()
+	reelStartToken += 1
+	if reelConnection then
+		pcall(function()
+			reelConnection:Disconnect()
+		end)
+		reelConnection = nil
+	end
+	restoreReelControl()
+	Input.SetReelHeld(false)
+end
+
+local attachReelGui
+
+local function startReel(reelGui)
+	local reel = reelGui or activeReelGui or existingReelGui()
+	if destroyed or not Settings.AutoReel or not reel or not reel.Parent then
+		return false
+	end
+	if activeReelGui ~= reel then
+		attachReelGui(reel)
+		return true
+	end
+
+	reelStartToken += 1
+	local token = reelStartToken
+	if reelConnection then
+		reelConnection:Disconnect()
+		reelConnection = nil
+	end
+
+	task.spawn(function()
+		local patched = false
+		for _ = 1, 4 do
+			if destroyed
+				or not Settings.AutoReel
+				or token ~= reelStartToken
+				or activeReelGui ~= reel
+				or not reel.Parent
+			then
+				return
+			end
+
+			local bar, playerBar = reelParts(reel)
+			if bar and playerBar then
+				patched = patchInternalReelController(reel, bar, playerBar)
+				if patched then
+					break
+				end
+			end
+			task.wait(0.25)
+		end
+
+		if not patched or token ~= reelStartToken then
+			setStatus("Auto reel waiting for controller")
+			return
+		end
+
+		setStatus("Auto reel: internal max bar")
+		local elapsed = 0
+		reelConnection = RunService.Heartbeat:Connect(function(deltaTime)
+			elapsed += deltaTime
+			if elapsed >= 0.25 then
+				elapsed = 0
+				enforceReelValues()
+			end
+		end)
+	end)
+
+	return true
+end
+
+attachReelGui = function(reel)
+	if destroyed or not reel or not reel.Parent then
+		return
+	end
+
+	if activeReelGui ~= reel then
+		stopReel()
+		activeReelGui = reel
+	end
+	disconnectBucket(reelGuiConnections)
+
+	addConnection(reel.DescendantAdded:Connect(function(descendant)
+		local name = compactName(descendant.Name)
+		if Settings.AutoReel and (name == "bar" or name == "playerbar") then
+			task.defer(startReel, reel)
+		end
+	end), reelGuiConnections)
+
+	addConnection(reel.AncestryChanged:Connect(function()
+		if not reel:IsDescendantOf(PlayerGui) and activeReelGui == reel then
+			activeReelGui = nil
+			stopReel()
+		end
+	end), reelGuiConnections)
+
+	if Settings.AutoReel then
+		startReel(reel)
+	end
+end
+
+-- Selling --------------------------------------------------------------------
+
+local AUTO_SELL_INTERVAL = 300
+local autoSellToken = 0
+local sellAllRemote = nil
+local sellBusy = false
+
+local function resolveSellAllRemote()
+	if sellAllRemote and sellAllRemote.Parent then
+		return sellAllRemote
+	end
+
+	local world = workspace:FindFirstChild("world")
+	local npcs = world and world:FindFirstChild("npcs")
+	if not npcs then
+		return nil
+	end
+
+	for _, npcName in ipairs({ "Marc Merchant", "Merchant" }) do
+		local npc = npcs:FindFirstChild(npcName)
+		local merchant = npc and (npc:FindFirstChild("merchant") or npc:FindFirstChild("merchant", true))
+		local remote = merchant and (merchant:FindFirstChild("sellall") or merchant:FindFirstChild("sellall", true))
+		if remote and (remote:IsA("RemoteFunction") or remote:IsA("RemoteEvent")) then
+			sellAllRemote = remote
+			return remote
+		end
+	end
+
+	for _, descendant in ipairs(npcs:GetDescendants()) do
+		local name = compactName(descendant.Name)
+		if (name == "sellall" or name == "sellallfish" or name == "sellallitems")
+			and (descendant:IsA("RemoteFunction") or descendant:IsA("RemoteEvent"))
+		then
+			sellAllRemote = descendant
+			return descendant
+		end
+	end
+
+	return nil
+end
+
+local function sellInventory(source)
+	if sellBusy then
+		return false, "sell already in progress"
+	end
+	sellBusy = true
+
+	local remote = resolveSellAllRemote()
+	if not remote then
+		sellBusy = false
+		setStatus("Sell failed: Marc Merchant sellall remote not found")
+		return false, "sellall remote not found"
+	end
+
+	local ok, result = pcall(function()
+		if remote:IsA("RemoteFunction") then
+			return remote:InvokeServer()
+		end
+		remote:FireServer()
+		return true
+	end)
+	sellBusy = false
+
+	if ok then
+		setStatus((source or "Sell") .. ": inventory sold")
+	else
+		sellAllRemote = nil
+		setStatus((source or "Sell") .. " failed: " .. tostring(result))
+	end
+	return ok, result
+end
+
+local function scheduleAutoSell(token)
+	task.delay(AUTO_SELL_INTERVAL, function()
+		if destroyed or not Settings.AutoSell or token ~= autoSellToken then
+			return
+		end
+		sellInventory("Auto sell")
+		scheduleAutoSell(token)
+	end)
+end
+
+local function setAutoSell(value)
+	Settings.AutoSell = value == true
+	autoSellToken += 1
+	if Settings.AutoSell then
+		setStatus("Auto sell armed: every 5 minutes")
+		scheduleAutoSell(autoSellToken)
+	else
+		setStatus("Auto sell disabled")
+	end
+end
+
+-- Conservative one-way FPS booster ------------------------------------------
+
+local fpsBoosterApplied = false
+
+local function reduceVisualCost(instance)
+	pcall(function()
+		if instance:IsA("BasePart") then
+			instance.CastShadow = false
+		elseif instance:IsA("ParticleEmitter")
+			or instance:IsA("Trail")
+			or instance:IsA("Beam")
+			or instance:IsA("Smoke")
+			or instance:IsA("Fire")
+			or instance:IsA("Sparkles")
+		then
+			instance.Enabled = false
+		end
+	end)
+end
+
+local function applyFpsBooster()
+	if fpsBoosterApplied then
+		setStatus("FPS booster is already active")
+		return
+	end
+	fpsBoosterApplied = true
+	setStatus("Applying FPS booster...")
+
+	pcall(function()
+		settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+	end)
+
+	local lighting = game:GetService("Lighting")
+	pcall(function()
+		lighting.GlobalShadows = false
+		lighting.EnvironmentDiffuseScale = 0
+		lighting.EnvironmentSpecularScale = 0
+	end)
+	for _, effect in ipairs(lighting:GetChildren()) do
+		if effect:IsA("PostEffect") then
+			pcall(function()
+				effect.Enabled = false
+			end)
+		end
+	end
+
+	local terrain = workspace:FindFirstChildOfClass("Terrain")
+	if terrain then
+		pcall(function()
+			terrain.WaterWaveSize = 0
+			terrain.WaterWaveSpeed = 0
+			terrain.WaterReflectance = 0
+		end)
+	end
+
+	addConnection(workspace.DescendantAdded:Connect(reduceVisualCost))
+
+	task.spawn(function()
+		local descendants = workspace:GetDescendants()
+		for index, instance in ipairs(descendants) do
+			reduceVisualCost(instance)
+			if index % 400 == 0 then
+				task.wait()
+			end
+		end
+		table.clear(descendants)
+		setStatus("FPS booster active")
+	end)
+end
+
 -- Rod-state orchestration ----------------------------------------------------
 
 local function cancelScheduledCast()
@@ -3671,8 +4758,8 @@ local function setAutoShake(value)
 			setStatus("Waiting for shake prompt")
 		end
 	else
-		shakeScanGeneration += 1
-		table.clear(shakeCandidates)
+		shakeLoopToken += 1
+		cachedShakeButton = nil
 		disconnectBucket(shakeConnections)
 		activeShakeGui = nil
 	end
@@ -10294,7 +11381,7 @@ Window = RenLib:CreateWindow({
 	DisplayOrder = 1000,
 	ShowUserProfile = true,
 	ProfileUserId = LocalPlayer.UserId,
-	ProfileSubtitle = "GUI-only automation",
+	ProfileSubtitle = "Optimized fishing automation",
 	ShowInfiniteYield = false,
 	EnableGlobalSearch = false,
 	EnableSidebarResize = true,
@@ -10323,6 +11410,12 @@ local RuntimeSection = FishingTab:CreateSection({
 	Name = "Runtime",
 	Side = "Right",
 	Icon = RenLib.Icons.Terminal or RenLib.Icons.Info,
+})
+
+local UtilitySection = FishingTab:CreateSection({
+	Name = "Utilities",
+	Side = "Left",
+	Icon = RenLib.Icons.Star or RenLib.Icons.Info,
 })
 
 uiControls.FullAuto = AutomationSection:CreateToggle({
@@ -10358,8 +11451,35 @@ uiControls.AutoReel = AutomationSection:CreateToggle({
 	Name = "Auto Reel",
 	Flag = "FishingAutoReel",
 	Default = false,
-	Tooltip = "Uses the calibrated fixed hybrid reel controller.",
+	Tooltip = "Uses the optimized internal max-bar controller from the updated script.",
 	Callback = setAutoReel,
+})
+
+uiControls.AutoSell = AutomationSection:CreateToggle({
+	Name = "Auto Sell Inventory",
+	Flag = "FishingAutoSell",
+	Default = false,
+	Tooltip = "Sells all fish through Marc Merchant every 5 minutes.",
+	Callback = setAutoSell,
+})
+
+UtilitySection:CreateButton({
+	Name = "Sell Inventory Now",
+	Tooltip = "Manually sells all fish through Marc Merchant.",
+	Callback = function()
+		task.spawn(sellInventory, "Manual sell")
+	end,
+})
+
+UtilitySection:CreateButton({
+	Name = "Apply Safe FPS Booster",
+	Tooltip = "One-way for this script session: lowers quality, removes shadows, post effects, particles, trails, and beams without changing collisions or gameplay parts.",
+	Callback = applyFpsBooster,
+})
+
+UtilitySection:CreateParagraph({
+	Title = "FPS booster safety",
+	Content = "Does not delete parts, change collisions, hide UI, disable rendering, or alter fishing controls. Rejoin to restore visual effects.",
 })
 
 local castModeParagraph
@@ -10412,7 +11532,7 @@ inputControl = RuntimeSection:CreateParagraph({
 
 RuntimeSection:CreateParagraph({
 	Title = "Performance safeguards",
-	Content = "Bounded calibration samples, weak GUI caches, cached cast descendants, cancellable delayed casts, lifecycle-managed connections, and no per-frame full-GUI scans.",
+	Content = "Event-driven GUI discovery, cached shake targets, 0.25s reel enforcement, one bounded reel fallback scan per session, cancellable delayed tasks, and lifecycle-managed connections.",
 })
 
 -- Runtime event wiring -------------------------------------------------------
@@ -10461,7 +11581,7 @@ addConnection(PlayerGui.ChildAdded:Connect(function(child)
 		and Settings.AutoShake
 	then
 		attachShakeGui(child)
-	elseif child.Name == "reel"
+	elseif compactName(child.Name) == "reel"
 		and child:IsA("LayerCollector")
 	then
 		attachReelGui(child)
@@ -10471,8 +11591,8 @@ end))
 addConnection(PlayerGui.ChildRemoved:Connect(function(child)
 	if child == activeShakeGui then
 		activeShakeGui = nil
-		shakeScanGeneration += 1
-		table.clear(shakeCandidates)
+		shakeLoopToken += 1
+		cachedShakeButton = nil
 		disconnectBucket(shakeConnections)
 	elseif child == activeReelGui then
 		activeReelGui = nil
@@ -10498,15 +11618,15 @@ function App.Destroy(fromRenLib)
 	Settings.AutoCast = false
 	Settings.AutoShake = false
 	Settings.AutoReel = false
+	Settings.AutoSell = false
+	autoSellToken += 1
 
 	clearCastSession()
 	stopReel()
 	Input.ReleaseAll()
 
-	shakeScanGeneration += 1
-	table.clear(shakeCandidates)
-	table.clear(shakeButtonStates)
-	resetCalibrationSamples()
+	shakeLoopToken += 1
+	cachedShakeButton = nil
 
 	disconnectBucket(shakeConnections)
 	disconnectBucket(reelGuiConnections)
