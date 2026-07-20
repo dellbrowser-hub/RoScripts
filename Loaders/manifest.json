@@ -26,7 +26,7 @@
       "placeId": "16732694052",
       "universal": false,
       "description": "A fisch script that has auto farming in it , it bypasses the anticheat by impersonating macro-like behaviour ",
-      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/FishTest.lua"
+      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/FischTest.lua"
     },
      {
       "name": "UI Dumper (Alpha)",
