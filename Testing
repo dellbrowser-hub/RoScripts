@@ -1,0 +1,251 @@
+-- Fisch Reel Controller Decompiler
+-- Waits for the active reel minigame, decompiles its controller LocalScript,
+-- copies the result to the clipboard, and optionally saves a local file.
+
+local Players = game:GetService("Players")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+local function getGlobal(name)
+    local environments = {
+        (type(getgenv) == "function" and getgenv()) or nil,
+        _G,
+    }
+
+    for _, environment in ipairs(environments) do
+        if type(environment) == "table" then
+            local value = rawget(environment, name)
+            if value ~= nil then
+                return value
+            end
+        end
+    end
+
+    return nil
+end
+
+local function findDecompiler()
+    local direct = getGlobal("decompile")
+    if type(direct) == "function" then
+        return direct, "decompile"
+    end
+
+    local synTable = getGlobal("syn")
+    if type(synTable) == "table" and type(synTable.decompile) == "function" then
+        return synTable.decompile, "syn.decompile"
+    end
+
+    local executorTable = getGlobal("executor")
+    if type(executorTable) == "table" and type(executorTable.decompile) == "function" then
+        return executorTable.decompile, "executor.decompile"
+    end
+
+    return nil, nil
+end
+
+local function findClipboard()
+    local directNames = {
+        "setclipboard",
+        "toclipboard",
+        "set_clipboard",
+    }
+
+    for _, name in ipairs(directNames) do
+        local callback = getGlobal(name)
+        if type(callback) == "function" then
+            return callback, name
+        end
+    end
+
+    local clipboardTable = getGlobal("Clipboard")
+    if type(clipboardTable) == "table" then
+        local callback =
+            clipboardTable.set
+            or clipboardTable.Set
+            or clipboardTable.write
+            or clipboardTable.Write
+
+        if type(callback) == "function" then
+            return function(text)
+                local ok = pcall(callback, clipboardTable, text)
+                if ok then
+                    return
+                end
+
+                callback(text)
+            end, "Clipboard.set"
+        end
+    end
+
+    return nil, nil
+end
+
+local function isTargetController(instance)
+    if not instance:IsA("LocalScript") then
+        return false
+    end
+
+    local parent = instance.Parent
+    local grandparent = parent and parent.Parent
+
+    return instance.Name:lower() == "reel"
+        and parent ~= nil
+        and parent.Name:lower() == "bar"
+        and grandparent ~= nil
+        and grandparent.Name:lower() == "reel"
+end
+
+local function findExactController()
+    local reelGui = PlayerGui:FindFirstChild("reel")
+    local bar = reelGui and reelGui:FindFirstChild("bar")
+    local controller = bar and bar:FindFirstChild("reel")
+
+    if controller and controller:IsA("LocalScript") then
+        return controller
+    end
+
+    for _, descendant in ipairs(PlayerGui:GetDescendants()) do
+        if isTargetController(descendant) then
+            return descendant
+        end
+    end
+
+    return nil
+end
+
+local function normalizeDecompilerResult(...)
+    local results = table.pack(...)
+
+    for index = 1, results.n do
+        local value = results[index]
+
+        if type(value) == "string" and #value > 0 then
+            return value
+        end
+
+        if type(value) == "table" then
+            local possibleSource =
+                value.Source
+                or value.source
+                or value.Code
+                or value.code
+                or value.Result
+                or value.result
+
+            if type(possibleSource) == "string" and #possibleSource > 0 then
+                return possibleSource
+            end
+        end
+    end
+
+    return nil
+end
+
+local decompiler, decompilerName = findDecompiler()
+assert(
+    type(decompiler) == "function",
+    "No supported decompiler function was found. Expected decompile(...) or syn.decompile(...)."
+)
+
+local clipboard, clipboardName = findClipboard()
+assert(
+    type(clipboard) == "function",
+    "No supported clipboard function was found. Expected setclipboard(...) or toclipboard(...)."
+)
+
+print("[Reel Extractor] Loaded")
+print("[Reel Extractor] Decompiler:", decompilerName)
+print("[Reel Extractor] Clipboard:", clipboardName)
+print("[Reel Extractor] Start a reel minigame now...")
+
+local controller = findExactController()
+local deadline = os.clock() + 120
+
+while not controller and os.clock() < deadline do
+    local added = PlayerGui.DescendantAdded:Wait()
+
+    if isTargetController(added) then
+        controller = added
+        break
+    end
+
+    controller = findExactController()
+end
+
+assert(
+    controller,
+    "Timed out after 120 seconds. Start the reel minigame and run the extractor again."
+)
+
+print("[Reel Extractor] Controller found:", controller:GetFullName())
+
+-- Give the controller a moment to finish loading before decompilation.
+task.wait(0.25)
+
+local ok, resultA, resultB, resultC = pcall(decompiler, controller)
+
+if not ok then
+    -- Some decompiler methods expect a self argument.
+    local owner
+
+    if decompilerName == "syn.decompile" then
+        owner = getGlobal("syn")
+    elseif decompilerName == "executor.decompile" then
+        owner = getGlobal("executor")
+    end
+
+    if owner then
+        ok, resultA, resultB, resultC = pcall(
+            decompiler,
+            owner,
+            controller
+        )
+    end
+end
+
+assert(
+    ok,
+    "Decompiler call failed: " .. tostring(resultA)
+)
+
+local source = normalizeDecompilerResult(resultA, resultB, resultC)
+
+assert(
+    type(source) == "string" and #source > 0,
+    "The decompiler returned no source text."
+)
+
+local fullPath = controller:GetFullName()
+
+local output = table.concat({
+    "-- Fisch reel controller",
+    "-- Path: " .. fullPath,
+    "-- Class: " .. controller.ClassName,
+    "-- Decompiled at Unix time: " .. tostring(os.time()),
+    "",
+    source,
+}, "\n")
+
+local clipboardOk, clipboardError = pcall(clipboard, output)
+
+assert(
+    clipboardOk,
+    "Clipboard copy failed: " .. tostring(clipboardError)
+)
+
+print("[Reel Extractor] Decompiled source copied to clipboard.")
+print("[Reel Extractor] Character count:", #output)
+
+local writeFile = getGlobal("writefile")
+
+if type(writeFile) == "function" then
+    local filename = "Fisch_Reel_Controller_Decompiled.lua"
+    local fileOk, fileError = pcall(writeFile, filename, output)
+
+    if fileOk then
+        print("[Reel Extractor] Also saved as:", filename)
+    else
+        warn("[Reel Extractor] File save failed:", fileError)
+    end
+end  
