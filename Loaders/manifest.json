@@ -16,14 +16,14 @@
     },
     {
       "name": "Fisch",
-      "placeId": "142823291",
+      "placeId": "16732694052",
       "universal": false,
       "description": "A fisch script that has auto farming in it , it bypasses the anticheat by impersonating macro-like behaviour ",
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/Fish.lua"
     },
     {
       "name": "MM2",
-      "placeId": "16911289637",
+      "placeId": "142823291",
       "universal": false,
       "description": "ESP , noclip , fly , aimbot with autoshoot , autofarm coins , anti afk , anti fling ",
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/mm2.lua"
