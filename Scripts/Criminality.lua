@@ -34,7 +34,8 @@ local Runtime = {
     Destroyed = false,
     Connections = {},
     Instances = {},
-    Version = "2.2.1 REWRITE",
+    Version = "2.2.8 SAFE",
+    AimRenderStepName = "RenCriminalityAim_" .. tostring(game:GetService("Players").LocalPlayer.UserId),
 }
 Shared.RenCriminality = Runtime
 
@@ -86,7 +87,7 @@ local Config = {
         Enabled = false,
         TargetPart = "Head",
         FOV = 200,
-        Response = 0.72,
+        Response = 0.35,
         WallCheck = true,
         StickToTarget = true,
         IgnoreFriends = true,
@@ -99,17 +100,16 @@ local Config = {
     },
     Survival = {
         InfiniteStamina = false,
+        CompatibilitySprintSpeed = 24,
         AntiRagdoll = false,
     },
     Utility = {
         NoFailLockpick = false,
         UnlockNearbyDoors = false,
         OpenNearbyDoors = false,
-        NoFlash = false,
-        NoSmoke = false,
-        RemoveBarbedWire = false,
         InstantInteract = false,
         AutoPickupMoney = false,
+        FPSBooster = false,
     },
 }
 Runtime.Config = Config
@@ -126,18 +126,28 @@ function Game.GetCharacter(player)
         return nil
     end
     local characters = Game.GetCharactersFolder()
-    return characters and characters:FindFirstChild(player.Name) or nil
+    local customCharacter = characters and characters:FindFirstChild(player.Name) or nil
+    if customCharacter then
+        return customCharacter
+    end
+    -- Keep the Criminality folder contract, but do not make every feature fail in
+    -- places/rounds that temporarily use Roblox's normal Player.Character path.
+    local character = player.Character
+    return character and character.Parent and character or nil
 end
 
 function Game.GetHumanoid(character)
-    return character and character:FindFirstChild("Humanoid") or nil
+    return character and (character:FindFirstChild("Humanoid") or character:FindFirstChildOfClass("Humanoid")) or nil
 end
 
 function Game.GetRoot(character)
     if not character then
         return nil
     end
-    return character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Torso")
+    return character:FindFirstChild("HumanoidRootPart")
+        or character:FindFirstChild("Torso")
+        or character:FindFirstChild("UpperTorso")
+        or character.PrimaryPart
 end
 
 function Game.GetHead(character)
@@ -837,6 +847,10 @@ local WorldESP = {
     Records = {},
     ScanClock = 0,
     BoundsRefresh = 2.0,
+    -- Roblox only renders a limited number of Highlight instances. Reserve the
+    -- available slots for players first so a busy map cannot erase player ESP.
+    HighlightLimit = 31,
+    HighlightReserve = 2,
 }
 Runtime.WorldESP = WorldESP
 
@@ -1035,7 +1049,7 @@ function WorldESP:CreateRecord(object)
     return record
 end
 
-function WorldESP:UpdateRecord(object, record)
+function WorldESP:UpdateRecord(object, record, allowHighlight)
     -- Expensive taken/broken/loot-state checks are handled by Discover().
     -- The render loop only projects already-valid records so movement stays frame-synchronous.
     if not Config.WorldESP.Enabled or not object or not object.Parent then
@@ -1057,7 +1071,7 @@ function WorldESP:UpdateRecord(object, record)
     end
 
     local colorName, color = self:GetTypeAndColor(object)
-    record.Highlight.Enabled = true
+    record.Highlight.Enabled = allowHighlight == true
     record.Highlight.FillColor = color
     record.Highlight.OutlineColor = color
 
@@ -1177,9 +1191,33 @@ function WorldESP:UpdateAll()
         for _, record in pairs(self.Records) do self:HideRecord(record) end
         return
     end
+    local localRoot = Game.GetLocalRoot()
+    local candidates = {}
+    for object, record in pairs(self.Records) do
+        if object.Parent and record.Primary and record.Primary.Parent then
+            local distance = localRoot and (record.Primary.Position - localRoot.Position).Magnitude or math.huge
+            table.insert(candidates, {Object = object, Distance = distance})
+        end
+    end
+    table.sort(candidates, function(a, b) return a.Distance < b.Distance end)
+
+    local playerHighlightCount = 0
+    if Config.ESP.Enabled and Config.ESP.Highlight then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and Game.IsAlive(player) then
+                playerHighlightCount += 1
+            end
+        end
+    end
+    local worldHighlightBudget = math.max(0, self.HighlightLimit - self.HighlightReserve - playerHighlightCount)
+    local highlighted = {}
+    for index = 1, math.min(worldHighlightBudget, #candidates) do
+        highlighted[candidates[index].Object] = true
+    end
+
     for object, record in pairs(self.Records) do
         if object.Parent then
-            self:UpdateRecord(object, record)
+            self:UpdateRecord(object, record, highlighted[object] == true)
         else
             self:DestroyRecord(object)
         end
@@ -1199,7 +1237,11 @@ local Aim = {
     CachedWallClear = false,
     PingSeconds = 0.065,
     ManualOverrideUntil = 0,
-    ManualOverrideDuration = 0.30,
+    ManualOverrideDuration = 0.12,
+    MouseOverrideThreshold = 7.5,
+    StickFOVMultiplier = 1.35,
+    TargetGraceDuration = 0.22,
+    LastTargetValidAt = 0,
     LastPingUpdate = 0,
     Motion = {},
 }
@@ -1329,10 +1371,14 @@ function Aim:AcquireTarget(now)
             local point, onScreen = camera:WorldToViewportPoint(target.Position)
             local center = camera.ViewportSize * 0.5
             local distance = (Vector2.new(point.X, point.Y) - center).Magnitude
-            local wallClear = self:IsWallClear(character, target.Position)
-            if point.Z > 0 and onScreen and distance <= Config.Aim.FOV and wallClear then
+            local insideStickyFov = point.Z > 0 and onScreen and distance <= Config.Aim.FOV * self.StickFOVMultiplier
+            local wallClear = insideStickyFov and self:IsWallClear(character, target.Position)
+            if insideStickyFov and wallClear then
+                self.LastTargetValidAt = now
                 return current
             end
+            -- Brief camera/animation/raycast changes should not throw away a lock.
+            if now - self.LastTargetValidAt <= self.TargetGraceDuration then return current end
         end
     end
 
@@ -1355,6 +1401,7 @@ function Aim:AcquireTarget(now)
 
     if best ~= self.CurrentTarget then
         self.Motion = {}
+        self.LastTargetValidAt = best and now or 0
     end
     self.CurrentTarget = best
     return best
@@ -1393,8 +1440,6 @@ end
 
 function Aim:ManualOverride()
     if not Config.Aim.Enabled then return end
-    self.CurrentTarget = nil
-    self.Motion = {}
     self.ManualOverrideUntil = os.clock() + self.ManualOverrideDuration
 end
 
@@ -1431,8 +1476,6 @@ function Aim:Update(dt)
 
     local now = os.clock()
     if now < self.ManualOverrideUntil then
-        self.CurrentTarget = nil
-        self.Motion = {}
         return
     end
     self:UpdatePing(now)
@@ -1463,7 +1506,9 @@ function Aim:Update(dt)
 
     local desired = CFrame.lookAt(origin, predicted)
     local response = math.clamp(Config.Aim.Response, 0.05, 1)
-    local rate = 5 + response * 45
+    -- Exponential smoothing stays frame-rate independent without behaving like
+    -- an instant camera snap at ordinary response values.
+    local rate = 2.0 + response * 18
     local alpha = response >= 0.995 and 1 or (1 - math.exp(-rate * math.min(dt, 0.1)))
     camera.CFrame = camera.CFrame:Lerp(desired, alpha)
 end
@@ -1479,6 +1524,8 @@ end
 -- Survival utilities: targeted Criminality-style paths only; no brute-force descendant loops.
 local Survival = {
     LastEnergyPulse = 0,
+    StaminaCacheAt = 0,
+    StaminaValues = {},
     LastRagdollPulse = 0,
     LastMovementSample = 0,
     RagdollConnection = nil,
@@ -1488,17 +1535,123 @@ local Survival = {
 }
 Runtime.Survival = Survival
 
-function Survival:GetEnergyRemote()
-    local events = LocalPlayer:FindFirstChild("Events")
-    local energy = events and events:FindFirstChild("Energy")
-    return energy and energy:IsA("RemoteEvent") and energy or nil
+local STAMINA_STATE_NAMES = {
+    stamina = true,
+    energy = true,
+    endurance = true,
+    sprintenergy = true,
+    sprintstamina = true,
+    currentstamina = true,
+    currentenergy = true,
+}
+
+function Survival:SetInfiniteStamina(enabled)
+    Config.Survival.InfiniteStamina = enabled == true
+    if Config.Survival.InfiniteStamina then
+        notify("Safe stamina", "Compatibility mode enabled. Unsafe function hooks are disabled.", 3)
+    end
+end
+
+function Survival:GetStaminaRoots()
+    local character = Game.GetCharacter(LocalPlayer)
+    local roots, seen = {}, {}
+    local function add(root)
+        if root and not seen[root] then
+            seen[root] = true
+            table.insert(roots, root)
+        end
+    end
+    add(LocalPlayer:FindFirstChild("Data"))
+    add(LocalPlayer:FindFirstChild("Stats"))
+    add(LocalPlayer:FindFirstChild("Values"))
+    add(LocalPlayer:FindFirstChild("Settings"))
+    add(getSettingsState(LocalPlayer))
+    add(character)
+    add(Game.GetHumanoid(character))
+    return roots
+end
+
+function Survival:GetStaminaValues(now)
+    now = now or os.clock()
+    if now - self.StaminaCacheAt < 0.75 then
+        local live = {}
+        for _, value in ipairs(self.StaminaValues) do
+            if value and value.Parent then table.insert(live, value) end
+        end
+        if #live > 0 then
+            self.StaminaValues = live
+            return live
+        end
+    end
+
+    local found, seen = {}, {}
+    local function consider(instance)
+        if not instance or seen[instance] then return end
+        seen[instance] = true
+        local key = normalizedStateName(instance.Name)
+        if STAMINA_STATE_NAMES[key] and (instance:IsA("NumberValue") or instance:IsA("IntValue")) then
+            table.insert(found, instance)
+        end
+    end
+    for _, root in ipairs(self:GetStaminaRoots()) do
+        if root then
+            consider(root)
+            for _, descendant in ipairs(root:GetDescendants()) do consider(descendant) end
+        end
+    end
+    -- Some places store the value directly under Player rather than in Data.
+    for _, child in ipairs(LocalPlayer:GetChildren()) do consider(child) end
+
+    self.StaminaValues = found
+    self.StaminaCacheAt = now
+    return found
 end
 
 function Survival:GetStaminaValue()
-    local data = LocalPlayer:FindFirstChild("Data")
-    local stamina = data and data:FindFirstChild("Stamina")
-    if stamina and (stamina:IsA("NumberValue") or stamina:IsA("IntValue")) then return stamina end
-    return nil
+    return self:GetStaminaValues(os.clock())[1]
+end
+
+function Survival:GetStaminaCeiling(value)
+    local current = tonumber(value.Value) or 0
+    for _, attribute in ipairs({"Max", "Maximum", "MaxValue", "Capacity"}) do
+        local maximum = tonumber(value:GetAttribute(attribute))
+        if maximum and maximum > 0 then return math.max(current, maximum) end
+    end
+
+    local parent = value.Parent
+    if parent then
+        local base = normalizedStateName(value.Name)
+        local candidates = base == "energy"
+            and {"MaxEnergy", "EnergyMax", "MaximumEnergy"}
+            or {"MaxStamina", "StaminaMax", "MaximumStamina", "MaxEnergy", "EnergyMax"}
+        for _, name in ipairs(candidates) do
+            local maximumValue = parent:FindFirstChild(name)
+            if maximumValue and (maximumValue:IsA("NumberValue") or maximumValue:IsA("IntValue")) then
+                local maximum = tonumber(maximumValue.Value)
+                if maximum and maximum > 0 then return math.max(current, maximum) end
+            end
+            local maximum = tonumber(parent:GetAttribute(name))
+            if maximum and maximum > 0 then return math.max(current, maximum) end
+        end
+    end
+    return math.max(current, 100)
+end
+
+function Survival:RefillStaminaAttributes()
+    for _, root in ipairs(self:GetStaminaRoots()) do
+        if root then
+            for name, value in pairs(root:GetAttributes()) do
+                local key = normalizedStateName(name)
+                if STAMINA_STATE_NAMES[key] and type(value) == "number" then
+                    local maximum = tonumber(root:GetAttribute("Max" .. name))
+                        or tonumber(root:GetAttribute(name .. "Max"))
+                        or tonumber(root:GetAttribute("Maximum" .. name))
+                        or math.max(value, 100)
+                    if value < maximum then pcall(function() root:SetAttribute(name, maximum) end) end
+                end
+            end
+        end
+    end
 end
 
 function Survival:GetLocalSettingsState()
@@ -1506,20 +1659,15 @@ function Survival:GetLocalSettingsState()
 end
 
 function Survival:ApplyInfiniteStamina(now)
-    if not Config.Survival.InfiniteStamina or now - self.LastEnergyPulse < 0.18 then return end
+    if not Config.Survival.InfiniteStamina or now - self.LastEnergyPulse < 0.05 then return end
     self.LastEnergyPulse = now
 
-    local energy = self:GetEnergyRemote()
-    if energy then
-        pcall(function() energy:FireServer(false) end)
-    end
-
-    local stamina = self:GetStaminaValue()
-    if stamina then
+    for _, stamina in ipairs(self:GetStaminaValues(now)) do
         local current = tonumber(stamina.Value) or 0
-        local ceiling = tonumber(stamina:GetAttribute("Max")) or tonumber(stamina:GetAttribute("Maximum")) or math.max(current, 100)
+        local ceiling = self:GetStaminaCeiling(stamina)
         if current < ceiling then pcall(function() stamina.Value = ceiling end) end
     end
+    self:RefillStaminaAttributes()
 end
 
 function Survival:SampleHealthyMovement(now)
@@ -1528,9 +1676,23 @@ function Survival:SampleHealthyMovement(now)
     local character = Game.GetCharacter(LocalPlayer)
     local humanoid = Game.GetHumanoid(character)
     if not humanoid or humanoid.Health <= 0 or Game.IsRagdolled(LocalPlayer) then return end
-    if humanoid.WalkSpeed > 2 then self.HealthyWalkSpeed = humanoid.WalkSpeed end
+    if humanoid.WalkSpeed > self.HealthyWalkSpeed then self.HealthyWalkSpeed = humanoid.WalkSpeed end
     if humanoid.JumpPower > 2 then self.HealthyJumpPower = humanoid.JumpPower end
     if humanoid.JumpHeight > 1 then self.HealthyJumpHeight = humanoid.JumpHeight end
+end
+
+function Survival:MaintainInfiniteSprintFrame()
+    if not Config.Survival.InfiniteStamina then return end
+    local character = LocalPlayer.Character or Game.GetCharacter(LocalPlayer)
+    local humanoid = Game.GetHumanoid(character)
+    if not humanoid or humanoid.Health <= 0 or humanoid.MoveDirection.Magnitude <= 0 then return end
+
+    local sprintHeld = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+        or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+    if sprintHeld then
+        local sprintSpeed = math.max(Config.Survival.CompatibilitySprintSpeed, self.HealthyWalkSpeed)
+        if humanoid.WalkSpeed < sprintSpeed then pcall(function() humanoid.WalkSpeed = sprintSpeed end) end
+    end
 end
 
 function Survival:RequestJump()
@@ -1595,6 +1757,24 @@ function Survival:RecoverLocalRagdoll()
     end
 end
 
+function Survival:PreventRagdollFrame()
+    if not Config.Survival.AntiRagdoll then return end
+    local character = LocalPlayer.Character or Game.GetCharacter(LocalPlayer)
+    local humanoid = Game.GetHumanoid(character)
+    if not humanoid or humanoid.Health <= 0 then return end
+
+    local state = humanoid:GetState()
+    if state == Enum.HumanoidStateType.Physics
+        or state == Enum.HumanoidStateType.Ragdoll
+        or state == Enum.HumanoidStateType.FallingDown then
+        pcall(function()
+            humanoid.PlatformStand = false
+            humanoid.Sit = false
+            humanoid:ChangeState(Enum.HumanoidStateType.Running)
+        end)
+    end
+end
+
 function Survival:BindHumanoid()
     if self.RagdollConnection then pcall(function() self.RagdollConnection:Disconnect() end) end
     self.RagdollConnection = nil
@@ -1630,9 +1810,10 @@ end
 -- Lightweight interaction/effect utilities. Everything is path/name gated and reversible where possible.
 local Utility = {
     PromptOriginals = setmetatable({}, {__mode = "k"}),
-    EffectOriginals = setmetatable({}, {__mode = "k"}),
-    WireOriginals = setmetatable({}, {__mode = "k"}),
+    PromptConnections = setmetatable({}, {__mode = "k"}),
+    FPSOriginals = setmetatable({}, {__mode = "k"}),
     LockpickOriginals = setmetatable({}, {__mode = "k"}),
+    LockpickConnection = nil,
     PromptCooldowns = setmetatable({}, {__mode = "k"}),
     LastNearby = 0,
     LastMoney = 0,
@@ -1669,6 +1850,21 @@ end
 
 function Utility:ApplyPrompt(prompt)
     if not prompt or not prompt:IsA("ProximityPrompt") then return end
+    if not self.PromptConnections[prompt] then
+        local connection = prompt.PromptButtonHoldBegan:Connect(function()
+            if not Config.Utility.InstantInteract then return end
+            pcall(function() prompt.HoldDuration = 0 end)
+            task.spawn(function()
+                for _ = 1, 3 do
+                    if not Config.Utility.InstantInteract or not prompt.Parent then break end
+                    pcall(function() prompt:InputHoldBegin() end)
+                    task.wait()
+                end
+            end)
+        end)
+        self.PromptConnections[prompt] = connection
+        Runtime:AddConnection(connection)
+    end
     if Config.Utility.InstantInteract then
         if self.PromptOriginals[prompt] == nil then self.PromptOriginals[prompt] = prompt.HoldDuration end
         pcall(function() prompt.HoldDuration = 0 end)
@@ -1689,88 +1885,71 @@ function Utility:SetInstantInteract(enabled)
     end
 end
 
-function Utility:DisableEffect(instance, category)
-    if not instance or not instance.Parent then return end
-    local matches = category == "flash"
-        and ancestorNameMatches(instance, {"flash", "concussion", "stunflash"})
-        or category == "smoke" and ancestorNameMatches(instance, {"smoke", "teargas", "gascloud", "smokescreen"})
-    if not matches then return end
+function Utility:SetFPSProperty(object, property, value)
+    if not object then return end
+    local ok, current = pcall(function() return object[property] end)
+    if not ok then return end
+    local originals = self.FPSOriginals[object]
+    if not originals then
+        originals = {}
+        self.FPSOriginals[object] = originals
+    end
+    if originals[property] == nil then originals[property] = current end
+    pcall(function() object[property] = value end)
+end
 
-    if instance:IsA("PostEffect") or instance:IsA("ParticleEmitter") or instance:IsA("Trail") or instance:IsA("Beam") or instance:IsA("Smoke") then
-        if self.EffectOriginals[instance] == nil then self.EffectOriginals[instance] = {kind = "Enabled", value = instance.Enabled} end
-        pcall(function() instance.Enabled = false end)
-    elseif instance:IsA("GuiObject") then
-        if self.EffectOriginals[instance] == nil then self.EffectOriginals[instance] = {kind = "Visible", value = instance.Visible} end
-        pcall(function() instance.Visible = false end)
+function Utility:ApplyFPSBooster(instance)
+    if not Config.Utility.FPSBooster or not instance then return end
+    if instance:IsA("BasePart") then
+        self:SetFPSProperty(instance, "CastShadow", false)
+        self:SetFPSProperty(instance, "Material", Enum.Material.Plastic)
+        self:SetFPSProperty(instance, "MaterialVariant", "")
+        self:SetFPSProperty(instance, "Reflectance", 0)
+    end
+    if instance:IsA("MeshPart") then self:SetFPSProperty(instance, "TextureID", "") end
+    if instance:IsA("SpecialMesh") then self:SetFPSProperty(instance, "TextureId", "") end
+    if instance:IsA("Decal") or instance:IsA("Texture") then self:SetFPSProperty(instance, "Transparency", 1) end
+    if instance:IsA("SurfaceAppearance") then
+        self:SetFPSProperty(instance, "ColorMap", "")
+        self:SetFPSProperty(instance, "NormalMap", "")
+        self:SetFPSProperty(instance, "MetalnessMap", "")
+        self:SetFPSProperty(instance, "RoughnessMap", "")
+    end
+    if instance:IsA("ParticleEmitter") or instance:IsA("Trail") or instance:IsA("Beam")
+        or instance:IsA("Smoke") or instance:IsA("Fire") or instance:IsA("Sparkles")
+        or instance:IsA("PostEffect") then
+        self:SetFPSProperty(instance, "Enabled", false)
+    end
+    if instance:IsA("Atmosphere") then
+        self:SetFPSProperty(instance, "Density", 0)
+        self:SetFPSProperty(instance, "Haze", 0)
+        self:SetFPSProperty(instance, "Glare", 0)
+    end
+    if instance:IsA("Clouds") then self:SetFPSProperty(instance, "Enabled", false) end
+    if instance:IsA("Terrain") then
+        self:SetFPSProperty(instance, "Decoration", false)
+        self:SetFPSProperty(instance, "WaterWaveSize", 0)
+        self:SetFPSProperty(instance, "WaterWaveSpeed", 0)
+        self:SetFPSProperty(instance, "WaterReflectance", 0)
     end
 end
 
-function Utility:RefreshEffects()
-    if not Config.Utility.NoFlash and not Config.Utility.NoSmoke then return end
-    local roots = {LocalPlayer:FindFirstChildOfClass("PlayerGui"), Services.Lighting, Workspace}
-    for _, root in ipairs(roots) do
-        if root then
-            for _, descendant in ipairs(root:GetDescendants()) do
-                if Config.Utility.NoFlash then self:DisableEffect(descendant, "flash") end
-                if Config.Utility.NoSmoke then self:DisableEffect(descendant, "smoke") end
-            end
-        end
-    end
-end
-
-function Utility:RestoreEffectsIfUnused()
-    if Config.Utility.NoFlash or Config.Utility.NoSmoke then return end
-    for instance, data in pairs(self.EffectOriginals) do
-        if instance.Parent and data then
-            if data.kind == "Enabled" then pcall(function() instance.Enabled = data.value end)
-            elseif data.kind == "Visible" then pcall(function() instance.Visible = data.value end) end
-        end
-    end
-    table.clear(self.EffectOriginals)
-end
-
-function Utility:SetNoFlash(enabled)
-    Config.Utility.NoFlash = enabled == true
-    if enabled then self:RefreshEffects() else self:RestoreEffectsIfUnused() end
-end
-
-function Utility:SetNoSmoke(enabled)
-    Config.Utility.NoSmoke = enabled == true
-    if enabled then self:RefreshEffects() else self:RestoreEffectsIfUnused() end
-end
-
-function Utility:ApplyBarbed(instance)
-    if not Config.Utility.RemoveBarbedWire or not instance:IsA("BasePart") then return end
-    if not ancestorNameMatches(instance, {"barbedwire", "barbwire", "barbed", "razorwire"}) then return end
-    if self.WireOriginals[instance] == nil then
-        self.WireOriginals[instance] = {
-            CanCollide = instance.CanCollide,
-            CanTouch = instance.CanTouch,
-            LocalTransparencyModifier = instance.LocalTransparencyModifier,
-        }
-    end
-    pcall(function()
-        instance.CanCollide = false
-        instance.CanTouch = false
-        instance.LocalTransparencyModifier = 1
-    end)
-end
-
-function Utility:SetRemoveBarbedWire(enabled)
-    Config.Utility.RemoveBarbedWire = enabled == true
+function Utility:SetFPSBooster(enabled)
+    Config.Utility.FPSBooster = enabled == true
     if enabled then
-        for _, descendant in ipairs(Workspace:GetDescendants()) do self:ApplyBarbed(descendant) end
+        self:SetFPSProperty(Services.Lighting, "GlobalShadows", false)
+        self:SetFPSProperty(Services.Lighting, "EnvironmentDiffuseScale", 0)
+        self:SetFPSProperty(Services.Lighting, "EnvironmentSpecularScale", 0)
+        local okRendering, rendering = pcall(function() return settings().Rendering end)
+        if okRendering and rendering then self:SetFPSProperty(rendering, "QualityLevel", Enum.QualityLevel.Level01) end
+        self:ApplyFPSBooster(Workspace.Terrain)
+        for _, descendant in ipairs(Workspace:GetDescendants()) do self:ApplyFPSBooster(descendant) end
+        for _, descendant in ipairs(Services.Lighting:GetDescendants()) do self:ApplyFPSBooster(descendant) end
     else
-        for part, data in pairs(self.WireOriginals) do
-            if part.Parent then
-                pcall(function()
-                    part.CanCollide = data.CanCollide
-                    part.CanTouch = data.CanTouch
-                    part.LocalTransparencyModifier = data.LocalTransparencyModifier
-                end)
-            end
+        for object, properties in pairs(self.FPSOriginals) do
+            for property, value in pairs(properties) do pcall(function() object[property] = value end) end
         end
-        table.clear(self.WireOriginals)
+        table.clear(self.FPSOriginals)
     end
 end
 
@@ -1803,28 +1982,41 @@ function Utility:FirePromptWithCooldown(prompt, cooldown)
 end
 
 function Utility:ProcessNearbyDoors(now)
-    if not Config.Utility.NoFailLockpick and not Config.Utility.UnlockNearbyDoors and not Config.Utility.OpenNearbyDoors then return end
+    if not Config.Utility.UnlockNearbyDoors and not Config.Utility.OpenNearbyDoors then return end
     if now - self.LastNearby < 0.16 then return end
     self.LastNearby = now
-    local seen = {}
-    for _, part in ipairs(self:GetNearbyParts(5.5)) do
-        local candidate = part
-        for _ = 1, 3 do
-            if not candidate then break end
-            if not seen[candidate] and ancestorNameMatches(candidate, {"door", "gate", "entrance"}) then
-                seen[candidate] = true
-                for _, descendant in ipairs(candidate:GetDescendants()) do
-                    if descendant:IsA("ProximityPrompt") then
-                        if (Config.Utility.NoFailLockpick or Config.Utility.UnlockNearbyDoors)
-                            and self:PromptLooksLike(descendant, {"unlock", "lockpick", "picklock"}) then
-                            self:FirePromptWithCooldown(descendant, Config.Utility.NoFailLockpick and 0.24 or 0.45)
-                        elseif Config.Utility.OpenNearbyDoors and self:PromptLooksLike(descendant, {"open", "door", "use"}) and not self:PromptLooksLike(descendant, {"close", "lock"}) then
-                            self:FirePromptWithCooldown(descendant, 0.35)
-                        end
+
+    local character = LocalPlayer.Character or Game.GetCharacter(LocalPlayer)
+    local humanoid = Game.GetHumanoid(character)
+    local root = Game.GetRoot(character)
+    if not root or not humanoid or humanoid.Health <= 0 then return end
+
+    local map = Workspace:FindFirstChild("Map")
+    local doors = map and map:FindFirstChild("Doors")
+    if not doors then return end
+
+    for _, door in ipairs(doors:GetChildren()) do
+        local doorBase = door:FindFirstChild("DoorBase")
+        if doorBase and doorBase:IsA("BasePart") and (root.Position - doorBase.Position).Magnitude <= 5 then
+            local values = door:FindFirstChild("Values")
+            local events = door:FindFirstChild("Events")
+            local toggle = events and events:FindFirstChild("Toggle")
+            if values and toggle and toggle:IsA("RemoteEvent") then
+                if Config.Utility.UnlockNearbyDoors then
+                    local locked = values:FindFirstChild("Locked")
+                    local lock = door:FindFirstChild("Lock")
+                    if locked and lock and locked.Value == true then
+                        pcall(function() toggle:FireServer("Unlock", lock) end)
+                    end
+                end
+                if Config.Utility.OpenNearbyDoors then
+                    local open = values:FindFirstChild("Open")
+                    local knob = door:FindFirstChild("Knob2")
+                    if open and knob and open.Value == false then
+                        pcall(function() toggle:FireServer("Open", knob) end)
                     end
                 end
             end
-            candidate = candidate.Parent
         end
     end
 end
@@ -1854,31 +2046,61 @@ function Utility:ProcessMoney(now)
     end
 end
 
+function Utility:ApplyLockpickMagnifier(lockpickGui, waitForChildren)
+    if not Config.Utility.NoFailLockpick or not lockpickGui or lockpickGui.Name ~= "LockpickGUI" then return false end
+    local function getChild(parent, name)
+        if not parent then return nil end
+        return waitForChildren and parent:WaitForChild(name, 10) or parent:FindFirstChild(name)
+    end
+
+    local mf = getChild(lockpickGui, "MF")
+    local lpFrame = getChild(mf, "LP_Frame")
+    local frames = getChild(lpFrame, "Frames")
+    if not frames then return false end
+
+    local changed = false
+    for _, name in ipairs({"B1", "B2", "B3"}) do
+        local holder = getChild(frames, name)
+        local bar = holder and getChild(holder, "Bar")
+        local scale = bar and (bar:FindFirstChild("UIScale") or bar:FindFirstChildOfClass("UIScale"))
+        if scale then
+            if self.LockpickOriginals[scale] == nil then self.LockpickOriginals[scale] = scale.Scale end
+            pcall(function() scale.Scale = 10 end)
+            changed = true
+        end
+    end
+    return changed
+end
+
 function Utility:AssistLockpick(now)
     if not Config.Utility.NoFailLockpick or now - self.LastLockpick < 0.10 then return end
     self.LastLockpick = now
-    local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if not gui then return end
-    for _, descendant in ipairs(gui:GetDescendants()) do
-        if descendant:IsA("GuiObject") and ancestorNameMatches(descendant, {"lockpick", "picklock", "lockpicking"}) then
-            local key = normalizedObjectName(descendant)
-            if string.find(key, "pin", 1, true) or string.find(key, "target", 1, true) or string.find(key, "zone", 1, true) or string.find(key, "bar", 1, true) then
-                if self.LockpickOriginals[descendant] == nil then self.LockpickOriginals[descendant] = descendant.Size end
-                local parent = descendant.Parent
-                if parent and parent:IsA("GuiObject") and parent.AbsoluteSize.X > 0 and descendant.AbsoluteSize.X < parent.AbsoluteSize.X * 0.55 then
-                    local width = math.max(descendant.Size.X.Offset, math.floor(parent.AbsoluteSize.X * 0.55))
-                    pcall(function() descendant.Size = UDim2.new(descendant.Size.X.Scale, width, descendant.Size.Y.Scale, descendant.Size.Y.Offset) end)
-                end
-            end
-        end
-    end
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local lockpickGui = playerGui and playerGui:FindFirstChild("LockpickGUI")
+    if lockpickGui then self:ApplyLockpickMagnifier(lockpickGui, false) end
 end
 
 function Utility:SetNoFailLockpick(enabled)
     Config.Utility.NoFailLockpick = enabled == true
-    if not enabled then
-        for object, size in pairs(self.LockpickOriginals) do
-            if object.Parent then pcall(function() object.Size = size end) end
+    if self.LockpickConnection then
+        pcall(function() self.LockpickConnection:Disconnect() end)
+        self.LockpickConnection = nil
+    end
+
+    if enabled then
+        local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not playerGui then return end
+        local existing = playerGui:FindFirstChild("LockpickGUI")
+        if existing then self:ApplyLockpickMagnifier(existing, false) end
+        self.LockpickConnection = playerGui.ChildAdded:Connect(function(item)
+            if item.Name == "LockpickGUI" and Config.Utility.NoFailLockpick then
+                task.spawn(function() self:ApplyLockpickMagnifier(item, true) end)
+            end
+        end)
+        Runtime:AddConnection(self.LockpickConnection)
+    else
+        for scale, original in pairs(self.LockpickOriginals) do
+            if scale.Parent then pcall(function() scale.Scale = original end) end
         end
         table.clear(self.LockpickOriginals)
     end
@@ -1886,9 +2108,7 @@ end
 
 function Utility:OnDescendantAdded(descendant)
     if descendant:IsA("ProximityPrompt") then self:ApplyPrompt(descendant) end
-    if Config.Utility.NoFlash then self:DisableEffect(descendant, "flash") end
-    if Config.Utility.NoSmoke then self:DisableEffect(descendant, "smoke") end
-    self:ApplyBarbed(descendant)
+    if Config.Utility.FPSBooster then self:ApplyFPSBooster(descendant) end
 end
 
 function Utility:Update(now)
@@ -2279,55 +2499,68 @@ function UI:Build()
 
     local survivalSection = utilityTab:CreateSection({Name = "Local player", Side = "Left"})
     local interactionSection = utilityTab:CreateSection({Name = "Interactions", Side = "Right"})
-    local effectsSection = utilityTab:CreateSection({Name = "World / effects", Side = "Left"})
+    local performanceSection = utilityTab:CreateSection({Name = "Performance", Side = "Left"})
     local shortcuts = utilityTab:CreateSection({Name = "Quick toggles", Side = "Right"})
     local session = utilityTab:CreateSection({Name = "Session", Side = "Left"})
 
     self.Controls.Stamina = survivalSection:CreateToggle({
-        Name = "Infinite stamina",
+        Name = "Safe Infinite Sprint",
         Flag = "CrimInfiniteStamina",
         Default = Config.Survival.InfiniteStamina,
-        Tooltip = "Uses targeted local Energy/Stamina paths only; no workspace/player descendant scanning.",
+        Tooltip = "Crash-safe alternative: refills accessible local values and maintains sprint speed while Shift is held. No function hooks.",
         Callback = function(value)
-            Config.Survival.InfiniteStamina = value
+            Survival:SetInfiniteStamina(value)
         end,
     })
+    survivalSection:CreateLabel("SAFE MODE ONLY: the true upvalue-hook version was removed because this executor crashes when it is used.")
+    survivalSection:CreateSlider({
+        Name = "Safe sprint speed",
+        Flag = "CrimCompatibilitySprintSpeed",
+        Min = 16,
+        Max = 40,
+        Step = 1,
+        Default = Config.Survival.CompatibilitySprintSpeed,
+        Callback = function(value)
+            Config.Survival.CompatibilitySprintSpeed = value
+        end,
+    })
+    survivalSection:CreateLabel("This alternative does not freeze the stamina meter; it preserves the sprinting effect without unsafe executor APIs.")
     self.Controls.AntiRagdoll = survivalSection:CreateToggle({
         Name = "Anti-ragdoll mobility",
         Flag = "CrimAntiRagdoll",
         Default = Config.Survival.AntiRagdoll,
-        Tooltip = "Event-driven recovery with lightweight KnockedOut/Downed attribute checks.",
+        Tooltip = "Forces Physics/Ragdoll/FallingDown humanoid states back to Running every rendered frame.",
         Callback = function(value)
             Survival:SetAntiRagdoll(value)
         end,
     })
 
     self.Controls.NoFailLockpick = interactionSection:CreateToggle({
-        Name = "No Fail Lockpick",
+        Name = "Lockpick Magnifier",
         Flag = "CrimNoFailLockpick",
         Default = Config.Utility.NoFailLockpick,
-        Tooltip = "Starts nearby lockpick prompts immediately and widens detected lockpick success zones; no high-frequency GC scan.",
+        Tooltip = "Magnifies LockpickGUI B1/B2/B3 bars by setting their UIScale to 10.",
         Callback = function(value) Utility:SetNoFailLockpick(value) end,
     })
     self.Controls.UnlockDoors = interactionSection:CreateToggle({
         Name = "Unlock Nearby Doors",
         Flag = "CrimUnlockDoors",
         Default = Config.Utility.UnlockNearbyDoors,
-        Tooltip = "Activates nearby unlock/lockpick prompts within 5 studs.",
+        Tooltip = "Calls Map.Doors.Events.Toggle with Unlock and the door Lock within 5 studs.",
         Callback = function(value) Config.Utility.UnlockNearbyDoors = value end,
     })
     self.Controls.OpenDoors = interactionSection:CreateToggle({
         Name = "Open Nearby Doors",
         Flag = "CrimOpenDoors",
         Default = Config.Utility.OpenNearbyDoors,
-        Tooltip = "Activates nearby open prompts within 5 studs.",
+        Tooltip = "Calls Map.Doors.Events.Toggle with Open and Knob2 within 5 studs.",
         Callback = function(value) Config.Utility.OpenNearbyDoors = value end,
     })
     self.Controls.InstantInteract = interactionSection:CreateToggle({
         Name = "Instant Interact",
         Flag = "CrimInstantInteract",
         Default = Config.Utility.InstantInteract,
-        Tooltip = "Sets ProximityPrompt hold time to zero and restores original values when disabled.",
+        Tooltip = "Sets prompt hold time to zero and repeats InputHoldBegin three times when interaction starts.",
         Callback = function(value) Utility:SetInstantInteract(value) end,
     })
     self.Controls.AutoPickupMoney = interactionSection:CreateToggle({
@@ -2338,23 +2571,12 @@ function UI:Build()
         Callback = function(value) Config.Utility.AutoPickupMoney = value end,
     })
 
-    self.Controls.NoFlash = effectsSection:CreateToggle({
-        Name = "No Flash",
-        Flag = "CrimNoFlash",
-        Default = Config.Utility.NoFlash,
-        Callback = function(value) Utility:SetNoFlash(value) end,
-    })
-    self.Controls.NoSmoke = effectsSection:CreateToggle({
-        Name = "No Smoke",
-        Flag = "CrimNoSmoke",
-        Default = Config.Utility.NoSmoke,
-        Callback = function(value) Utility:SetNoSmoke(value) end,
-    })
-    self.Controls.RemoveWire = effectsSection:CreateToggle({
-        Name = "Remove Barbed Wire",
-        Flag = "CrimRemoveWire",
-        Default = Config.Utility.RemoveBarbedWire,
-        Callback = function(value) Utility:SetRemoveBarbedWire(value) end,
+    self.Controls.FPSBooster = performanceSection:CreateToggle({
+        Name = "FPS Booster",
+        Flag = "CrimFPSBooster",
+        Default = Config.Utility.FPSBooster,
+        Tooltip = "Disables shadows, textures, particles, post effects, clouds, terrain decoration, and costly water effects; restores them when disabled.",
+        Callback = function(value) Utility:SetFPSBooster(value) end,
     })
 
     shortcuts:CreateKeyPicker({
@@ -2385,7 +2607,7 @@ function UI:Build()
         end,
     })
     shortcuts:CreateKeyPicker({
-        Name = "Infinite stamina",
+        Name = "Safe infinite sprint",
         Flag = "CrimKeyStamina",
         Default = "PageUp",
         Mode = "Toggle",
@@ -2439,6 +2661,7 @@ function Runtime:Destroy()
         return
     end
     self.Destroyed = true
+    pcall(function() RunService:UnbindFromRenderStep(self.AimRenderStepName) end)
     Config.ESP.Enabled = false
     Config.WorldESP.Enabled = false
     Config.Aim.Enabled = false
@@ -2449,10 +2672,7 @@ function Runtime:Destroy()
     Config.Utility.AutoPickupMoney = false
     Utility:SetInstantInteract(false)
     Utility:SetNoFailLockpick(false)
-    Config.Utility.NoFlash = false
-    Config.Utility.NoSmoke = false
-    Utility:RestoreEffectsIfUnused()
-    Utility:SetRemoveBarbedWire(false)
+    Utility:SetFPSBooster(false)
 
     ESP:Destroy()
     WorldESP:Destroy()
@@ -2498,10 +2718,17 @@ Runtime:AddConnection(RunService.RenderStepped:Connect(function(dt)
     if Runtime.Destroyed then
         return
     end
+    Survival:MaintainInfiniteSprintFrame()
+    Survival:PreventRagdollFrame()
     ESP:UpdateAll()
     WorldESP:UpdateAll()
-    Aim:Update(dt)
 end))
+
+-- Apply camera correction after Roblox's camera controller, otherwise the
+-- default camera step can overwrite the aim CFrame in the same frame.
+RunService:BindToRenderStep(Runtime.AimRenderStepName, Enum.RenderPriority.Camera.Value + 1, function(dt)
+    if not Runtime.Destroyed then Aim:Update(dt) end
+end)
 
 Runtime:AddConnection(RunService.Heartbeat:Connect(function(dt)
     if Runtime.Destroyed then
@@ -2525,7 +2752,7 @@ Runtime:AddConnection(UserInputService.InputChanged:Connect(function(input, game
     if Runtime.Destroyed or gameProcessed or UserInputService:GetFocusedTextBox() then return end
     if input.UserInputType == Enum.UserInputType.MouseMovement and Config.Aim.Enabled then
         local delta = input.Delta
-        if delta and delta.Magnitude >= 1.35 then Aim:ManualOverride() end
+        if delta and delta.Magnitude >= Aim.MouseOverrideThreshold then Aim:ManualOverride() end
     end
 end))
 
@@ -2536,7 +2763,9 @@ end))
 
 Runtime:AddConnection(LocalPlayer.CharacterAdded:Connect(function()
     task.delay(0.4, function()
-        if not Runtime.Destroyed then Survival:BindHumanoid() end
+        if not Runtime.Destroyed then
+            Survival:BindHumanoid()
+        end
     end)
 end))
 
