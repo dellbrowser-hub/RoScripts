@@ -34,7 +34,7 @@ local Runtime = {
     Destroyed = false,
     Connections = {},
     Instances = {},
-    Version = "2.2.8 SAFE",
+    Version = "2.2.9 NO STAMINA",
     AimRenderStepName = "RenCriminalityAim_" .. tostring(game:GetService("Players").LocalPlayer.UserId),
 }
 Shared.RenCriminality = Runtime
@@ -99,8 +99,6 @@ local Config = {
         AutoDetectRobloxFriends = true,
     },
     Survival = {
-        InfiniteStamina = false,
-        CompatibilitySprintSpeed = 24,
         AntiRagdoll = false,
     },
     Utility = {
@@ -1523,9 +1521,6 @@ end
 
 -- Survival utilities: targeted Criminality-style paths only; no brute-force descendant loops.
 local Survival = {
-    LastEnergyPulse = 0,
-    StaminaCacheAt = 0,
-    StaminaValues = {},
     LastRagdollPulse = 0,
     LastMovementSample = 0,
     RagdollConnection = nil,
@@ -1535,139 +1530,8 @@ local Survival = {
 }
 Runtime.Survival = Survival
 
-local STAMINA_STATE_NAMES = {
-    stamina = true,
-    energy = true,
-    endurance = true,
-    sprintenergy = true,
-    sprintstamina = true,
-    currentstamina = true,
-    currentenergy = true,
-}
-
-function Survival:SetInfiniteStamina(enabled)
-    Config.Survival.InfiniteStamina = enabled == true
-    if Config.Survival.InfiniteStamina then
-        notify("Safe stamina", "Compatibility mode enabled. Unsafe function hooks are disabled.", 3)
-    end
-end
-
-function Survival:GetStaminaRoots()
-    local character = Game.GetCharacter(LocalPlayer)
-    local roots, seen = {}, {}
-    local function add(root)
-        if root and not seen[root] then
-            seen[root] = true
-            table.insert(roots, root)
-        end
-    end
-    add(LocalPlayer:FindFirstChild("Data"))
-    add(LocalPlayer:FindFirstChild("Stats"))
-    add(LocalPlayer:FindFirstChild("Values"))
-    add(LocalPlayer:FindFirstChild("Settings"))
-    add(getSettingsState(LocalPlayer))
-    add(character)
-    add(Game.GetHumanoid(character))
-    return roots
-end
-
-function Survival:GetStaminaValues(now)
-    now = now or os.clock()
-    if now - self.StaminaCacheAt < 0.75 then
-        local live = {}
-        for _, value in ipairs(self.StaminaValues) do
-            if value and value.Parent then table.insert(live, value) end
-        end
-        if #live > 0 then
-            self.StaminaValues = live
-            return live
-        end
-    end
-
-    local found, seen = {}, {}
-    local function consider(instance)
-        if not instance or seen[instance] then return end
-        seen[instance] = true
-        local key = normalizedStateName(instance.Name)
-        if STAMINA_STATE_NAMES[key] and (instance:IsA("NumberValue") or instance:IsA("IntValue")) then
-            table.insert(found, instance)
-        end
-    end
-    for _, root in ipairs(self:GetStaminaRoots()) do
-        if root then
-            consider(root)
-            for _, descendant in ipairs(root:GetDescendants()) do consider(descendant) end
-        end
-    end
-    -- Some places store the value directly under Player rather than in Data.
-    for _, child in ipairs(LocalPlayer:GetChildren()) do consider(child) end
-
-    self.StaminaValues = found
-    self.StaminaCacheAt = now
-    return found
-end
-
-function Survival:GetStaminaValue()
-    return self:GetStaminaValues(os.clock())[1]
-end
-
-function Survival:GetStaminaCeiling(value)
-    local current = tonumber(value.Value) or 0
-    for _, attribute in ipairs({"Max", "Maximum", "MaxValue", "Capacity"}) do
-        local maximum = tonumber(value:GetAttribute(attribute))
-        if maximum and maximum > 0 then return math.max(current, maximum) end
-    end
-
-    local parent = value.Parent
-    if parent then
-        local base = normalizedStateName(value.Name)
-        local candidates = base == "energy"
-            and {"MaxEnergy", "EnergyMax", "MaximumEnergy"}
-            or {"MaxStamina", "StaminaMax", "MaximumStamina", "MaxEnergy", "EnergyMax"}
-        for _, name in ipairs(candidates) do
-            local maximumValue = parent:FindFirstChild(name)
-            if maximumValue and (maximumValue:IsA("NumberValue") or maximumValue:IsA("IntValue")) then
-                local maximum = tonumber(maximumValue.Value)
-                if maximum and maximum > 0 then return math.max(current, maximum) end
-            end
-            local maximum = tonumber(parent:GetAttribute(name))
-            if maximum and maximum > 0 then return math.max(current, maximum) end
-        end
-    end
-    return math.max(current, 100)
-end
-
-function Survival:RefillStaminaAttributes()
-    for _, root in ipairs(self:GetStaminaRoots()) do
-        if root then
-            for name, value in pairs(root:GetAttributes()) do
-                local key = normalizedStateName(name)
-                if STAMINA_STATE_NAMES[key] and type(value) == "number" then
-                    local maximum = tonumber(root:GetAttribute("Max" .. name))
-                        or tonumber(root:GetAttribute(name .. "Max"))
-                        or tonumber(root:GetAttribute("Maximum" .. name))
-                        or math.max(value, 100)
-                    if value < maximum then pcall(function() root:SetAttribute(name, maximum) end) end
-                end
-            end
-        end
-    end
-end
-
 function Survival:GetLocalSettingsState()
     return getSettingsState(LocalPlayer)
-end
-
-function Survival:ApplyInfiniteStamina(now)
-    if not Config.Survival.InfiniteStamina or now - self.LastEnergyPulse < 0.05 then return end
-    self.LastEnergyPulse = now
-
-    for _, stamina in ipairs(self:GetStaminaValues(now)) do
-        local current = tonumber(stamina.Value) or 0
-        local ceiling = self:GetStaminaCeiling(stamina)
-        if current < ceiling then pcall(function() stamina.Value = ceiling end) end
-    end
-    self:RefillStaminaAttributes()
 end
 
 function Survival:SampleHealthyMovement(now)
@@ -1679,20 +1543,6 @@ function Survival:SampleHealthyMovement(now)
     if humanoid.WalkSpeed > self.HealthyWalkSpeed then self.HealthyWalkSpeed = humanoid.WalkSpeed end
     if humanoid.JumpPower > 2 then self.HealthyJumpPower = humanoid.JumpPower end
     if humanoid.JumpHeight > 1 then self.HealthyJumpHeight = humanoid.JumpHeight end
-end
-
-function Survival:MaintainInfiniteSprintFrame()
-    if not Config.Survival.InfiniteStamina then return end
-    local character = LocalPlayer.Character or Game.GetCharacter(LocalPlayer)
-    local humanoid = Game.GetHumanoid(character)
-    if not humanoid or humanoid.Health <= 0 or humanoid.MoveDirection.Magnitude <= 0 then return end
-
-    local sprintHeld = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
-        or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
-    if sprintHeld then
-        local sprintSpeed = math.max(Config.Survival.CompatibilitySprintSpeed, self.HealthyWalkSpeed)
-        if humanoid.WalkSpeed < sprintSpeed then pcall(function() humanoid.WalkSpeed = sprintSpeed end) end
-    end
 end
 
 function Survival:RequestJump()
@@ -1799,7 +1649,6 @@ function Survival:SetAntiRagdoll(enabled)
 end
 
 function Survival:Update(now)
-    self:ApplyInfiniteStamina(now)
     self:SampleHealthyMovement(now)
     if Config.Survival.AntiRagdoll and now - self.LastRagdollPulse >= 0.12 then
         self.LastRagdollPulse = now
@@ -2503,28 +2352,6 @@ function UI:Build()
     local shortcuts = utilityTab:CreateSection({Name = "Quick toggles", Side = "Right"})
     local session = utilityTab:CreateSection({Name = "Session", Side = "Left"})
 
-    self.Controls.Stamina = survivalSection:CreateToggle({
-        Name = "Safe Infinite Sprint",
-        Flag = "CrimInfiniteStamina",
-        Default = Config.Survival.InfiniteStamina,
-        Tooltip = "Crash-safe alternative: refills accessible local values and maintains sprint speed while Shift is held. No function hooks.",
-        Callback = function(value)
-            Survival:SetInfiniteStamina(value)
-        end,
-    })
-    survivalSection:CreateLabel("SAFE MODE ONLY: the true upvalue-hook version was removed because this executor crashes when it is used.")
-    survivalSection:CreateSlider({
-        Name = "Safe sprint speed",
-        Flag = "CrimCompatibilitySprintSpeed",
-        Min = 16,
-        Max = 40,
-        Step = 1,
-        Default = Config.Survival.CompatibilitySprintSpeed,
-        Callback = function(value)
-            Config.Survival.CompatibilitySprintSpeed = value
-        end,
-    })
-    survivalSection:CreateLabel("This alternative does not freeze the stamina meter; it preserves the sprinting effect without unsafe executor APIs.")
     self.Controls.AntiRagdoll = survivalSection:CreateToggle({
         Name = "Anti-ragdoll mobility",
         Flag = "CrimAntiRagdoll",
@@ -2607,15 +2434,6 @@ function UI:Build()
         end,
     })
     shortcuts:CreateKeyPicker({
-        Name = "Safe infinite sprint",
-        Flag = "CrimKeyStamina",
-        Default = "PageUp",
-        Mode = "Toggle",
-        Callback = function(_, active)
-            self.Controls.Stamina:Set(active)
-        end,
-    })
-    shortcuts:CreateKeyPicker({
         Name = "Anti-ragdoll",
         Flag = "CrimKeyRagdoll",
         Default = "PageDown",
@@ -2665,7 +2483,6 @@ function Runtime:Destroy()
     Config.ESP.Enabled = false
     Config.WorldESP.Enabled = false
     Config.Aim.Enabled = false
-    Config.Survival.InfiniteStamina = false
     Config.Survival.AntiRagdoll = false
     Config.Utility.UnlockNearbyDoors = false
     Config.Utility.OpenNearbyDoors = false
@@ -2718,7 +2535,6 @@ Runtime:AddConnection(RunService.RenderStepped:Connect(function(dt)
     if Runtime.Destroyed then
         return
     end
-    Survival:MaintainInfiniteSprintFrame()
     Survival:PreventRagdollFrame()
     ESP:UpdateAll()
     WorldESP:UpdateAll()
