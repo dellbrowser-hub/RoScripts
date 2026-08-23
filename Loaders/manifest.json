@@ -8,13 +8,6 @@
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/RenU-V4.lua"
     },
     {
-      "name": "BloxFruit",
-      "placeId": "multiple ids but idk how",
-      "universal": false,
-      "description": "Bloxfruit autofarm , and other features...",
-      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/BloxFruit.lua"
-    },
-    {
       "name": "Hollow Point",
       "placeId": "16911289637",
       "universal": false,
@@ -23,7 +16,11 @@
     },
     {
       "name": "Fisch",
-      "placeId": "16732694052",
+      "placeId": [
+        "16732694052",
+    "131716211654599",
+    "72907489978215"
+       ],
       "universal": false,
       "description": "A fisch script that has auto farming in it , it bypasses the anticheat by impersonating macro-like behaviour ",
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/Fish.lua"
@@ -42,13 +39,6 @@
       "description": "A UI-driven Luau utility for saving, searching, and teleporting to custom-named locations with cross-game data merging and clipboard exporting.",
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/PositionManagementUtilitie.lua"
     },
-    {
-      "name": "FischTest",
-      "placeId": "16732694052",
-      "universal": false,
-      "description": "A fisch script that has auto farming in it , it bypasses the anticheat by impersonating macro-like behaviour ",
-      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/FischTest.lua"
-    },
      {
       "name": "UI Dumper (Alpha)",
       "placeId": "universal",
@@ -65,7 +55,16 @@
     },
     {
       "name": "Blox Fruits (in progress)",
-      "placeId": "2753915549",
+      "placeId": [
+        "2753915549",
+        "4442272183",
+        "7449423635",
+        "79091703265657",
+        "100117331123089",
+        "85211729168715",
+        "113741252407134",
+        "114279672983750"
+      ],
       "universal": false,
       "description": "Auto-farm for Blox Fruits (in progress)",
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/BloxFruits.lua"
@@ -86,7 +85,17 @@
     },
     {
       "name": "Criminality",
-      "placeId": "4588604953",
+      "placeId": [
+        "4588604953",
+      "8343259840",
+      "15169303036",
+      "15169306359",
+      "15169310267",
+      "15169316384",
+      "15169351413",
+      "15496696918",
+      "71778271646624"
+      ],
       "universal": false,
       "description": "Farm helper for criminality ",
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/Criminality.lua"
@@ -136,7 +145,6 @@
   ]
 
 }
-
 
 
 
