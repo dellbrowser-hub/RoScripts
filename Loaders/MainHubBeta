@@ -187,6 +187,82 @@ end
 -------------------------------------------------------------------------------
 --// SCRIPT UTILITIES
 -------------------------------------------------------------------------------
+-- Supports:
+--   "placeIds": ["123", "456"]   (recommended)
+--   "placeId":  ["123", "456"]   (also accepted)
+--   "placeId":  "123"              (legacy)
+local function ScriptSupportsPlace(scriptData, placeId)
+    if not scriptData then
+        return false
+    end
+
+    if scriptData.universal then
+        return true
+    end
+
+    local wantedPlaceId = tostring(placeId)
+
+    local function arrayContainsPlaceId(value)
+        if type(value) ~= "table" then
+            return false
+        end
+
+        for _, id in ipairs(value) do
+            if tostring(id) == wantedPlaceId then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    if arrayContainsPlaceId(scriptData.placeIds) then
+        return true
+    end
+
+    if arrayContainsPlaceId(scriptData.placeId) then
+        return true
+    end
+
+    if scriptData.placeId ~= nil and type(scriptData.placeId) ~= "table" then
+        return tostring(scriptData.placeId) == wantedPlaceId
+    end
+
+    return false
+end
+
+local function GetPlaceIdText(scriptData)
+    if not scriptData then
+        return "N/A"
+    end
+
+    if scriptData.universal then
+        return "Universal"
+    end
+
+    local idsSource = nil
+
+    if type(scriptData.placeIds) == "table" and #scriptData.placeIds > 0 then
+        idsSource = scriptData.placeIds
+    elseif type(scriptData.placeId) == "table" and #scriptData.placeId > 0 then
+        idsSource = scriptData.placeId
+    end
+
+    if idsSource then
+        local ids = {}
+        for _, id in ipairs(idsSource) do
+            table.insert(ids, tostring(id))
+        end
+        return "PlaceIds: " .. table.concat(ids, ", ")
+    end
+
+    if scriptData.placeId ~= nil then
+        return "PlaceId: " .. tostring(scriptData.placeId)
+    end
+
+    return "PlaceIds: N/A"
+end
+
 local function GetScriptList()
     local list = {}
     for _, script in pairs(ScriptDatabase) do
@@ -273,7 +349,7 @@ end
 -------------------------------------------------------------------------------
 local function AutoLaunchCurrentGame()
     for _, script in pairs(ScriptDatabase) do
-        if script and script.placeId == CurrentPlaceId and not script.universal then
+        if script and not script.universal and ScriptSupportsPlace(script, CurrentPlaceId) then
             SafeNotify("Auto-Launch", "Found: " .. script.name, 2)
             task.wait(0.5)
             ExecuteScript(script)
@@ -382,7 +458,7 @@ ScriptDropdown = AllScriptsSection:CreateDropdown({
     Callback = function(selected)
         SelectedScript = GetScriptByDisplayName(selected)
         if SelectedScript then
-            local typeText = SelectedScript.universal and "Universal" or ("PlaceId: " .. (SelectedScript.placeId or "N/A"))
+            local typeText = GetPlaceIdText(SelectedScript)
             local desc = SelectedScript.description or "No description"
             local info = string.format("Name: %s\nType: %s\nInfo: %s", SelectedScript.name, typeText, desc)
             pcall(function() ScriptInfoLabel:SetText(info) end)
@@ -443,7 +519,7 @@ FavDropdown = FavoritesSection:CreateDropdown({
     Callback = function(selected)
         SelectedFavorite = GetScriptByDisplayName(selected)
         if SelectedFavorite then
-            local typeText = SelectedFavorite.universal and "Universal" or ("PlaceId: " .. (SelectedFavorite.placeId or "N/A"))
+            local typeText = GetPlaceIdText(SelectedFavorite)
             local desc = SelectedFavorite.description or "No description"
             local info = string.format("Name: %s\nType: %s\nInfo: %s", SelectedFavorite.name, typeText, desc)
             pcall(function() FavInfoLabel:SetText(info) end)
