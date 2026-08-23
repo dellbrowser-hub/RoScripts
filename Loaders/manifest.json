@@ -8,6 +8,13 @@
       "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/RenU-V4.lua"
     },
     {
+      "name": "BloxFruit",
+      "placeId": "multiple ids but idk how",
+      "universal": false,
+      "description": "Bloxfruit autofarm , and other features...",
+      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/BloxFruit.lua"
+    },
+    {
       "name": "Hollow Point",
       "placeId": "16911289637",
       "universal": false,
