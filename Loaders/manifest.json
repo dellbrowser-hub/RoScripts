@@ -67,7 +67,7 @@
       ],
       "universal": false,
       "description": "Auto-farm for Blox Fruits (in progress)",
-      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/BloxFruits.lua"
+      "loadstring": "https://raw.githubusercontent.com/dellbrowser-hub/RoScripts/refs/heads/main/Scripts/BloxFruit.lua"
     },
     {
       "name": "Brainrot sniper",
