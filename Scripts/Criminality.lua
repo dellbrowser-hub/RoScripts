@@ -34,7 +34,7 @@ local Runtime = {
     Destroyed = false,
     Connections = {},
     Instances = {},
-    Version = "2.2.9 NO STAMINA",
+    Version = "2.3.2 NO STAMINA + FPS",
     AimRenderStepName = "RenCriminalityAim_" .. tostring(game:GetService("Players").LocalPlayer.UserId),
 }
 Shared.RenCriminality = Runtime
@@ -97,9 +97,6 @@ local Config = {
     },
     Lists = {
         AutoDetectRobloxFriends = true,
-    },
-    Survival = {
-        AntiRagdoll = false,
     },
     Utility = {
         NoFailLockpick = false,
@@ -256,6 +253,7 @@ local Lists = {
     Friends = {},
     Blacklist = {},
     AutoFriends = {},
+    IgnoredAutoFriends = {},
 }
 Runtime.Lists = Lists
 
@@ -281,6 +279,9 @@ function Lists:IsFriend(player)
     end
     if self.Friends[player.UserId] ~= nil then
         return true
+    end
+    if self.IgnoredAutoFriends[player.UserId] then
+        return false
     end
     return Config.Lists.AutoDetectRobloxFriends and self.AutoFriends[player.UserId] == true
 end
@@ -340,6 +341,7 @@ function Lists:AddFriend(query)
     local player, reason = self:ResolveLive(query)
     if not player then return false, reason end
     self.Blacklist[player.UserId] = nil
+    self.IgnoredAutoFriends[player.UserId] = nil
     self.Friends[player.UserId] = self:EntryForPlayer(player)
     if Runtime.UI and Runtime.UI.RefreshLists then Runtime.UI:RefreshLists() end
     return true, player.Name .. " is now a manual friend."
@@ -347,11 +349,23 @@ end
 
 function Lists:RemoveFriendByUserId(userId)
     userId = tonumber(userId)
-    local entry = userId and self.Friends[userId]
-    if not entry then return false, "That player is not in the manual friend list." end
+    if not userId then return false, "Select a friend first." end
+
+    local manualEntry = self.Friends[userId]
+    local wasAutoFriend = self.AutoFriends[userId] == true
+    local livePlayer = Players:GetPlayerByUserId(userId)
+    if not manualEntry and not wasAutoFriend then
+        return false, "That player is not in the friend list."
+    end
+
     self.Friends[userId] = nil
+    -- Prevent automatic Roblox-friend detection from immediately re-adding the
+    -- same user after the row is removed. Adding them manually clears this.
+    self.IgnoredAutoFriends[userId] = true
+
     if Runtime.UI and Runtime.UI.RefreshLists then Runtime.UI:RefreshLists() end
-    return true, entry.Name .. " removed from manual friends."
+    local name = manualEntry and manualEntry.Name or (livePlayer and livePlayer.Name) or tostring(userId)
+    return true, name .. " removed from the friend list for this session."
 end
 
 function Lists:AddBlacklist(query)
@@ -393,7 +407,7 @@ function Lists:GetFriendItems()
     end
     if Config.Lists.AutoDetectRobloxFriends then
         for userId, enabled in pairs(self.AutoFriends) do
-            if enabled and not self.Blacklist[userId] and not byId[userId] then
+            if enabled and not self.Blacklist[userId] and not self.IgnoredAutoFriends[userId] and not byId[userId] then
                 local player = Players:GetPlayerByUserId(userId)
                 if player then
                     byId[userId] = {Label = player.DisplayName, Description = "@" .. player.Name .. "  • Roblox friend", Value = userId}
@@ -1519,148 +1533,27 @@ function Aim:SetEnabled(enabled)
     end
 end
 
--- Survival utilities: targeted Criminality-style paths only; no brute-force descendant loops.
-local Survival = {
-    LastRagdollPulse = 0,
-    LastMovementSample = 0,
-    RagdollConnection = nil,
-    HealthyWalkSpeed = 16,
-    HealthyJumpPower = 50,
-    HealthyJumpHeight = 7.2,
-}
-Runtime.Survival = Survival
-
-function Survival:GetLocalSettingsState()
-    return getSettingsState(LocalPlayer)
-end
-
-function Survival:SampleHealthyMovement(now)
-    if now - self.LastMovementSample < 0.45 then return end
-    self.LastMovementSample = now
-    local character = Game.GetCharacter(LocalPlayer)
-    local humanoid = Game.GetHumanoid(character)
-    if not humanoid or humanoid.Health <= 0 or Game.IsRagdolled(LocalPlayer) then return end
-    if humanoid.WalkSpeed > self.HealthyWalkSpeed then self.HealthyWalkSpeed = humanoid.WalkSpeed end
-    if humanoid.JumpPower > 2 then self.HealthyJumpPower = humanoid.JumpPower end
-    if humanoid.JumpHeight > 1 then self.HealthyJumpHeight = humanoid.JumpHeight end
-end
-
-function Survival:RequestJump()
-    if not Config.Survival.AntiRagdoll or not Game.IsRagdolled(LocalPlayer) then return end
-    local character = Game.GetCharacter(LocalPlayer)
-    local humanoid = Game.GetHumanoid(character)
-    if not humanoid or humanoid.Health <= 0 then return end
-    pcall(function()
-        humanoid.PlatformStand = false
-        humanoid.Sit = false
-        humanoid.Jump = true
-        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-    end)
-end
-
-function Survival:RecoverLocalRagdoll()
-    if not Config.Survival.AntiRagdoll then return end
-    local character = Game.GetCharacter(LocalPlayer)
-    local humanoid = Game.GetHumanoid(character)
-    if not character or not humanoid or humanoid.Health <= 0 then return end
-
-    local settingsState = self:GetLocalSettingsState()
-    if settingsState then
-        for _, name in ipairs({"KnockedOut", "Ragdolled", "Ragdoll", "Downed", "Knocked"}) do
-            if settingsState:GetAttribute(name) == true then
-                pcall(function() settingsState:SetAttribute(name, false) end)
-            end
-        end
-    end
-
-    for _, instance in ipairs({LocalPlayer, character, humanoid}) do
-        if instance then
-            for _, name in ipairs({"KnockedOut", "Ragdolled", "Ragdoll", "Downed", "Knocked"}) do
-                if instance:GetAttribute(name) == true then pcall(function() instance:SetAttribute(name, false) end) end
-            end
-        end
-    end
-
-    local state = humanoid:GetState()
-    if Game.IsRagdolled(LocalPlayer)
-        or humanoid.PlatformStand
-        or state == Enum.HumanoidStateType.Ragdoll
-        or state == Enum.HumanoidStateType.FallingDown
-        or state == Enum.HumanoidStateType.Physics then
-        pcall(function() humanoid.PlatformStand = false end)
-        pcall(function() humanoid.Sit = false end)
-        pcall(function() humanoid.AutoRotate = true end)
-        pcall(function()
-            if humanoid.WalkSpeed < self.HealthyWalkSpeed then humanoid.WalkSpeed = self.HealthyWalkSpeed end
-            if humanoid.UseJumpPower then
-                if humanoid.JumpPower < self.HealthyJumpPower then humanoid.JumpPower = self.HealthyJumpPower end
-            elseif humanoid.JumpHeight < self.HealthyJumpHeight then
-                humanoid.JumpHeight = self.HealthyJumpHeight
-            end
-        end)
-        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
-        task.defer(function()
-            if Config.Survival.AntiRagdoll and humanoid.Parent and humanoid.Health > 0 then
-                pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
-            end
-        end)
-    end
-end
-
-function Survival:PreventRagdollFrame()
-    if not Config.Survival.AntiRagdoll then return end
-    local character = LocalPlayer.Character or Game.GetCharacter(LocalPlayer)
-    local humanoid = Game.GetHumanoid(character)
-    if not humanoid or humanoid.Health <= 0 then return end
-
-    local state = humanoid:GetState()
-    if state == Enum.HumanoidStateType.Physics
-        or state == Enum.HumanoidStateType.Ragdoll
-        or state == Enum.HumanoidStateType.FallingDown then
-        pcall(function()
-            humanoid.PlatformStand = false
-            humanoid.Sit = false
-            humanoid:ChangeState(Enum.HumanoidStateType.Running)
-        end)
-    end
-end
-
-function Survival:BindHumanoid()
-    if self.RagdollConnection then pcall(function() self.RagdollConnection:Disconnect() end) end
-    self.RagdollConnection = nil
-    local humanoid = Game.GetHumanoid(Game.GetCharacter(LocalPlayer))
-    if humanoid then
-        self.RagdollConnection = humanoid.StateChanged:Connect(function(_, newState)
-            if Config.Survival.AntiRagdoll and (
-                newState == Enum.HumanoidStateType.Ragdoll
-                or newState == Enum.HumanoidStateType.FallingDown
-                or newState == Enum.HumanoidStateType.Physics
-            ) then
-                task.defer(function() self:RecoverLocalRagdoll() end)
-            end
-        end)
-        Runtime:AddConnection(self.RagdollConnection)
-    end
-end
-
-function Survival:SetAntiRagdoll(enabled)
-    Config.Survival.AntiRagdoll = enabled == true
-    if Config.Survival.AntiRagdoll then self:RecoverLocalRagdoll() end
-end
-
-function Survival:Update(now)
-    self:SampleHealthyMovement(now)
-    if Config.Survival.AntiRagdoll and now - self.LastRagdollPulse >= 0.12 then
-        self.LastRagdollPulse = now
-        self:RecoverLocalRagdoll()
-    end
-end
-
 -- Lightweight interaction/effect utilities. Everything is path/name gated and reversible where possible.
 local Utility = {
     PromptOriginals = setmetatable({}, {__mode = "k"}),
     PromptConnections = setmetatable({}, {__mode = "k"}),
     FPSOriginals = setmetatable({}, {__mode = "k"}),
+    FPSQueued = setmetatable({}, {__mode = "k"}),
+    FPSTrackedParts = setmetatable({}, {__mode = "k"}),
+    FPSCharacterRoots = setmetatable({}, {__mode = "k"}),
+    FPSCullState = setmetatable({}, {__mode = "k"}),
+    FPSQueue = {},
+    FPSQueueHead = 1,
+    FPSQueueTail = 0,
+    FPSDistanceParts = {},
+    FPSDistanceIndex = 1,
+    FPSBatchSize = 140,
+    FPSDistanceBatchSize = 220,
+    FPSCullDistance = 700,
+    FPSUncullDistance = 575,
+    FPSLastCharacterRefresh = 0,
+    FPSLastScanStep = 0,
+    FPSLastCullStep = 0,
     LockpickOriginals = setmetatable({}, {__mode = "k"}),
     LockpickConnection = nil,
     PromptCooldowns = setmetatable({}, {__mode = "k"}),
@@ -1744,18 +1637,61 @@ function Utility:SetFPSProperty(object, property, value)
         self.FPSOriginals[object] = originals
     end
     if originals[property] == nil then originals[property] = current end
-    pcall(function() object[property] = value end)
+    if current ~= value then
+        pcall(function() object[property] = value end)
+    end
+end
+
+function Utility:RefreshFPSCharacterRoots()
+    table.clear(self.FPSCharacterRoots)
+    for _, player in ipairs(Players:GetPlayers()) do
+        local character = Game.GetCharacter(player)
+        if character then self.FPSCharacterRoots[character] = true end
+        if player.Character then self.FPSCharacterRoots[player.Character] = true end
+    end
+    self.FPSLastCharacterRefresh = os.clock()
+end
+
+function Utility:IsFPSCharacterInstance(instance)
+    local current = instance
+    local charactersFolder = Game.GetCharactersFolder()
+    for _ = 1, 10 do
+        if not current then break end
+        if self.FPSCharacterRoots[current] then return true end
+        if current:IsA("Model") then
+            local player = Players:GetPlayerFromCharacter(current)
+            if player or (charactersFolder and current.Parent == charactersFolder and Players:FindFirstChild(current.Name)) then
+                self.FPSCharacterRoots[current] = true
+                return true
+            end
+        end
+        if current == Workspace then break end
+        current = current.Parent
+    end
+    return false
+end
+
+function Utility:TrackFPSDistancePart(part)
+    if not part:IsA("BasePart") or not part.Anchored or self.FPSTrackedParts[part] then return end
+    self.FPSTrackedParts[part] = true
+    table.insert(self.FPSDistanceParts, part)
 end
 
 function Utility:ApplyFPSBooster(instance)
-    if not Config.Utility.FPSBooster or not instance then return end
+    if not Config.Utility.FPSBooster or not instance or self:IsFPSCharacterInstance(instance) then return end
+
     if instance:IsA("BasePart") then
         self:SetFPSProperty(instance, "CastShadow", false)
         self:SetFPSProperty(instance, "Material", Enum.Material.Plastic)
         self:SetFPSProperty(instance, "MaterialVariant", "")
         self:SetFPSProperty(instance, "Reflectance", 0)
+        self:TrackFPSDistancePart(instance)
     end
-    if instance:IsA("MeshPart") then self:SetFPSProperty(instance, "TextureID", "") end
+
+    if instance:IsA("MeshPart") then
+        self:SetFPSProperty(instance, "TextureID", "")
+        self:SetFPSProperty(instance, "RenderFidelity", Enum.RenderFidelity.Performance)
+    end
     if instance:IsA("SpecialMesh") then self:SetFPSProperty(instance, "TextureId", "") end
     if instance:IsA("Decal") or instance:IsA("Texture") then self:SetFPSProperty(instance, "Transparency", 1) end
     if instance:IsA("SurfaceAppearance") then
@@ -1766,7 +1702,8 @@ function Utility:ApplyFPSBooster(instance)
     end
     if instance:IsA("ParticleEmitter") or instance:IsA("Trail") or instance:IsA("Beam")
         or instance:IsA("Smoke") or instance:IsA("Fire") or instance:IsA("Sparkles")
-        or instance:IsA("PostEffect") then
+        or instance:IsA("PostEffect") or instance:IsA("PointLight")
+        or instance:IsA("SpotLight") or instance:IsA("SurfaceLight") then
         self:SetFPSProperty(instance, "Enabled", false)
     end
     if instance:IsA("Atmosphere") then
@@ -1780,6 +1717,86 @@ function Utility:ApplyFPSBooster(instance)
         self:SetFPSProperty(instance, "WaterWaveSize", 0)
         self:SetFPSProperty(instance, "WaterWaveSpeed", 0)
         self:SetFPSProperty(instance, "WaterReflectance", 0)
+        self:SetFPSProperty(instance, "WaterTransparency", 1)
+    end
+    if instance:IsA("Model") then
+        self:SetFPSProperty(instance, "LevelOfDetail", Enum.ModelLevelOfDetail.StreamingMesh)
+    end
+end
+
+function Utility:QueueFPSInstance(instance)
+    if not Config.Utility.FPSBooster or not instance or self.FPSQueued[instance] then return end
+    self.FPSQueued[instance] = true
+    self.FPSQueueTail += 1
+    self.FPSQueue[self.FPSQueueTail] = instance
+end
+
+function Utility:StartFPSScan()
+    table.clear(self.FPSQueue)
+    table.clear(self.FPSQueued)
+    self.FPSQueueHead = 1
+    self.FPSQueueTail = 0
+    self:RefreshFPSCharacterRoots()
+    self:ApplyFPSBooster(Workspace.Terrain)
+    for _, child in ipairs(Workspace:GetChildren()) do self:QueueFPSInstance(child) end
+    for _, child in ipairs(Services.Lighting:GetChildren()) do self:QueueFPSInstance(child) end
+end
+
+function Utility:ProcessFPSScan()
+    if not Config.Utility.FPSBooster then return end
+    local processed = 0
+    while processed < self.FPSBatchSize and self.FPSQueueHead <= self.FPSQueueTail do
+        local instance = self.FPSQueue[self.FPSQueueHead]
+        self.FPSQueue[self.FPSQueueHead] = nil
+        self.FPSQueueHead += 1
+        if instance then self.FPSQueued[instance] = nil end
+        processed += 1
+
+        if instance and instance.Parent and not self:IsFPSCharacterInstance(instance) then
+            self:ApplyFPSBooster(instance)
+            for _, child in ipairs(instance:GetChildren()) do
+                self:QueueFPSInstance(child)
+            end
+        end
+    end
+
+    if self.FPSQueueHead > self.FPSQueueTail then
+        table.clear(self.FPSQueue)
+        self.FPSQueueHead = 1
+        self.FPSQueueTail = 0
+    end
+end
+
+function Utility:UpdateFPSDistanceCull()
+    if not Config.Utility.FPSBooster or #self.FPSDistanceParts == 0 then return end
+    local root = Game.GetLocalRoot()
+    if not root then return end
+
+    local farSquared = self.FPSCullDistance * self.FPSCullDistance
+    local nearSquared = self.FPSUncullDistance * self.FPSUncullDistance
+    local checked = 0
+    while checked < self.FPSDistanceBatchSize and #self.FPSDistanceParts > 0 do
+        if self.FPSDistanceIndex > #self.FPSDistanceParts then self.FPSDistanceIndex = 1 end
+        local part = self.FPSDistanceParts[self.FPSDistanceIndex]
+        self.FPSDistanceIndex += 1
+        checked += 1
+
+        if not part or not part.Parent then
+            -- Stale entries are harmless and are skipped; the array is compacted on next enable.
+        elseif not self:IsFPSCharacterInstance(part) then
+            local delta = part.Position - root.Position
+            local distanceSquared = delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
+            local culled = self.FPSCullState[part] == true
+            if not culled and distanceSquared >= farSquared then
+                self:SetFPSProperty(part, "LocalTransparencyModifier", 1)
+                self.FPSCullState[part] = true
+            elseif culled and distanceSquared <= nearSquared then
+                local originals = self.FPSOriginals[part]
+                local original = originals and originals.LocalTransparencyModifier
+                pcall(function() part.LocalTransparencyModifier = original == nil and 0 or original end)
+                self.FPSCullState[part] = nil
+            end
+        end
     end
 end
 
@@ -1790,15 +1807,29 @@ function Utility:SetFPSBooster(enabled)
         self:SetFPSProperty(Services.Lighting, "EnvironmentDiffuseScale", 0)
         self:SetFPSProperty(Services.Lighting, "EnvironmentSpecularScale", 0)
         local okRendering, rendering = pcall(function() return settings().Rendering end)
-        if okRendering and rendering then self:SetFPSProperty(rendering, "QualityLevel", Enum.QualityLevel.Level01) end
-        self:ApplyFPSBooster(Workspace.Terrain)
-        for _, descendant in ipairs(Workspace:GetDescendants()) do self:ApplyFPSBooster(descendant) end
-        for _, descendant in ipairs(Services.Lighting:GetDescendants()) do self:ApplyFPSBooster(descendant) end
+        if okRendering and rendering then
+            self:SetFPSProperty(rendering, "QualityLevel", Enum.QualityLevel.Level01)
+        end
+        table.clear(self.FPSDistanceParts)
+        table.clear(self.FPSTrackedParts)
+        table.clear(self.FPSCullState)
+        self.FPSDistanceIndex = 1
+        self:StartFPSScan()
     else
+        table.clear(self.FPSQueue)
+        table.clear(self.FPSQueued)
+        self.FPSQueueHead = 1
+        self.FPSQueueTail = 0
         for object, properties in pairs(self.FPSOriginals) do
-            for property, value in pairs(properties) do pcall(function() object[property] = value end) end
+            for property, value in pairs(properties) do
+                pcall(function() object[property] = value end)
+            end
         end
         table.clear(self.FPSOriginals)
+        table.clear(self.FPSDistanceParts)
+        table.clear(self.FPSTrackedParts)
+        table.clear(self.FPSCullState)
+        self.FPSDistanceIndex = 1
     end
 end
 
@@ -1957,13 +1988,24 @@ end
 
 function Utility:OnDescendantAdded(descendant)
     if descendant:IsA("ProximityPrompt") then self:ApplyPrompt(descendant) end
-    if Config.Utility.FPSBooster then self:ApplyFPSBooster(descendant) end
+    if Config.Utility.FPSBooster then self:QueueFPSInstance(descendant) end
 end
 
 function Utility:Update(now)
     self:ProcessNearbyDoors(now)
     self:ProcessMoney(now)
     self:AssistLockpick(now)
+    if Config.Utility.FPSBooster then
+        if now - self.FPSLastCharacterRefresh >= 1 then self:RefreshFPSCharacterRoots() end
+        if now - self.FPSLastScanStep >= 0.033 then
+            self.FPSLastScanStep = now
+            self:ProcessFPSScan()
+        end
+        if now - self.FPSLastCullStep >= 0.05 then
+            self.FPSLastCullStep = now
+            self:UpdateFPSDistanceCull()
+        end
+    end
 end
 
 -- UI: Visuals, Combat, Players, and Utility. Shortcuts are visible/rebindable.
@@ -2306,13 +2348,17 @@ function UI:Build()
         end,
     })
     friends:CreateButton({
-        Name = "Remove selected manual friend",
+        Name = "Remove selected friend",
         Callback = function()
             local ok, message = Lists:RemoveFriendByUserId(selectedFriendId)
+            if ok then
+                selectedFriendId = nil
+                if self.FriendList and self.FriendList.Select then self.FriendList:Select(nil) end
+            end
             notify(ok and "Friends" or "Friend error", message, 3)
         end,
     })
-    friends:CreateLabel("Roblox friends appear automatically; manual entries persist for the script session.")
+    friends:CreateLabel("Roblox friends appear automatically. Removing one hides it from friend status for this script session; adding it manually restores it.")
 
     self.BlacklistDropdown = blacklist:CreateDropdown({
         Name = "Live player",
@@ -2346,21 +2392,11 @@ function UI:Build()
     })
     blacklist:CreateLabel("Blacklist overrides both manual and automatically detected friend status.")
 
-    local survivalSection = utilityTab:CreateSection({Name = "Local player", Side = "Left"})
     local interactionSection = utilityTab:CreateSection({Name = "Interactions", Side = "Right"})
     local performanceSection = utilityTab:CreateSection({Name = "Performance", Side = "Left"})
     local shortcuts = utilityTab:CreateSection({Name = "Quick toggles", Side = "Right"})
     local session = utilityTab:CreateSection({Name = "Session", Side = "Left"})
 
-    self.Controls.AntiRagdoll = survivalSection:CreateToggle({
-        Name = "Anti-ragdoll mobility",
-        Flag = "CrimAntiRagdoll",
-        Default = Config.Survival.AntiRagdoll,
-        Tooltip = "Forces Physics/Ragdoll/FallingDown humanoid states back to Running every rendered frame.",
-        Callback = function(value)
-            Survival:SetAntiRagdoll(value)
-        end,
-    })
 
     self.Controls.NoFailLockpick = interactionSection:CreateToggle({
         Name = "Lockpick Magnifier",
@@ -2402,7 +2438,7 @@ function UI:Build()
         Name = "FPS Booster",
         Flag = "CrimFPSBooster",
         Default = Config.Utility.FPSBooster,
-        Tooltip = "Disables shadows, textures, particles, post effects, clouds, terrain decoration, and costly water effects; restores them when disabled.",
+        Tooltip = "Aggressive reversible FPS mode: batched map simplification, low mesh fidelity, disabled effects/lights/textures, simplified terrain/water, and far static-part culling. Player characters are excluded.",
         Callback = function(value) Utility:SetFPSBooster(value) end,
     })
 
@@ -2431,15 +2467,6 @@ function UI:Build()
         Mode = "Toggle",
         Callback = function(_, active)
             self.Controls.WorldESP:Set(active)
-        end,
-    })
-    shortcuts:CreateKeyPicker({
-        Name = "Anti-ragdoll",
-        Flag = "CrimKeyRagdoll",
-        Default = "PageDown",
-        Mode = "Toggle",
-        Callback = function(_, active)
-            self.Controls.AntiRagdoll:Set(active)
         end,
     })
     shortcuts:CreateKeyPicker({
@@ -2483,7 +2510,6 @@ function Runtime:Destroy()
     Config.ESP.Enabled = false
     Config.WorldESP.Enabled = false
     Config.Aim.Enabled = false
-    Config.Survival.AntiRagdoll = false
     Config.Utility.UnlockNearbyDoors = false
     Config.Utility.OpenNearbyDoors = false
     Config.Utility.AutoPickupMoney = false
@@ -2495,7 +2521,6 @@ function Runtime:Destroy()
     WorldESP:Destroy()
     Aim.CurrentTarget = nil
     Aim.Motion = {}
-    Survival:SetAntiRagdoll(false)
 
     for _, connection in ipairs(self.Connections) do
         pcall(function()
@@ -2528,14 +2553,12 @@ ESP:CreateOverlay()
 WorldESP:CreateOverlay()
 Aim:CreateFOV()
 Lists:DetectAllRobloxFriends()
-Survival:BindHumanoid()
 WorldESP:Discover()
 
 Runtime:AddConnection(RunService.RenderStepped:Connect(function(dt)
     if Runtime.Destroyed then
         return
     end
-    Survival:PreventRagdollFrame()
     ESP:UpdateAll()
     WorldESP:UpdateAll()
 end))
@@ -2551,7 +2574,6 @@ Runtime:AddConnection(RunService.Heartbeat:Connect(function(dt)
         return
     end
     local now = os.clock()
-    Survival:Update(now)
     Utility:Update(now)
     WorldESP.ScanClock += dt
     if WorldESP.ScanClock >= 0.55 then
@@ -2560,9 +2582,6 @@ Runtime:AddConnection(RunService.Heartbeat:Connect(function(dt)
     end
 end))
 
-Runtime:AddConnection(UserInputService.JumpRequest:Connect(function()
-    if not Runtime.Destroyed then Survival:RequestJump() end
-end))
 
 Runtime:AddConnection(UserInputService.InputChanged:Connect(function(input, gameProcessed)
     if Runtime.Destroyed or gameProcessed or UserInputService:GetFocusedTextBox() then return end
@@ -2577,10 +2596,11 @@ Runtime:AddConnection(Workspace.DescendantAdded:Connect(function(descendant)
     Utility:OnDescendantAdded(descendant)
 end))
 
+
 Runtime:AddConnection(LocalPlayer.CharacterAdded:Connect(function()
     task.delay(0.4, function()
-        if not Runtime.Destroyed then
-            Survival:BindHumanoid()
+        if not Runtime.Destroyed and Config.Utility.FPSBooster then
+            Utility:RefreshFPSCharacterRoots()
         end
     end)
 end))
